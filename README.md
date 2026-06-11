@@ -129,11 +129,24 @@ In your Frigate `config.yaml`:
 detectors:
   memryx:
     type: memryx
+    device: PCIe:0     # REQUIRED: ":0" = first MX3 (/dev/memx0)
 ```
 
-`.dfp` models are downloaded by Frigate at runtime. See the
-[MemryX + Frigate guide](https://devblog.memryx.com/memryx-frigate-manual-setup/)
+> **Don't omit `device: PCIe:0`.** Frigate's `device` field defaults to `"PCIe"`,
+> but its detector parses it as `device.split(":")[1]` — a bare `"PCIe"` raises
+> `IndexError: list index out of range` and the detector process crashes. The
+> `:0` index (matching `/dev/memx0`) is mandatory.
+
+`.dfp` models are downloaded by Frigate at runtime (default `model_type: yolonas`).
+See the [MemryX + Frigate guide](https://devblog.memryx.com/memryx-frigate-manual-setup/)
 for model configuration.
+
+> **TrueNAS note:** the official catalog Frigate app has no "privileged" toggle —
+> that lives only on the **Custom App** (docker-compose) install path. Frigate's
+> docs list `privileged: true`, but the heavy device work runs in the host
+> `mxa-manager` daemon, so passing just `/dev/memx0` + the `/run/mxa_manager`
+> volume is worth trying first; switch to a Custom App for `privileged: true` only
+> if device access fails.
 
 ## Important Notes
 

@@ -118,11 +118,11 @@ Two units, mirroring MemryX's own split (driver package vs. manager package):
   `After=memryx-load.service` and `Before=docker.service`. Adapted from MemryX's
   upstream `debian_manager/mxa-manager.service`; it runs as `root` rather than the
   upstream dedicated `mxa-manager` sysuser, because a sysext-shipped `sysusers.d`
-  entry isn't reliably created before the PREINIT merge on TrueNAS. `ExecStart`
-  passes the config as flags (`--addr /run/mxa_manager/ --port 10000 --log low
-  --interval 500`) rather than relying on `/etc/memryx/mxa_manager.conf`: the
-  daemon hardcodes that path and exits if it's absent, but a sysext can't ship
-  `/etc`, and `main_linux.cpp` skips the conf entirely when given CLI args.
+  entry isn't reliably created before the PREINIT merge on TrueNAS. The daemon
+  hardcodes its config path to `/etc/memryx/mxa_manager.conf` and the SDK 2.1
+  binary exits if it's absent, but a sysext can't ship `/etc` — so the conf is
+  bundled at `/usr/lib/memryx/mxa_manager.conf` and an `ExecStartPre` copies it
+  into `/etc/memryx/` on every start.
 
 Both are ordered **`Before=docker.service`** for the same reason as the sibling
 sysexts (`hailo-load`, `coral-load`, `nvidia-mig-setup`): TrueNAS apps run as

@@ -16,13 +16,14 @@ Description=MemryX MX3 device management daemon (mxa-manager)
 #     sysext is merged by the PREINIT path on TrueNAS, so the dedicated user
 #     may not exist when this unit starts. /dev/memx0 is 0666 and
 #     /run/mxa_manager is 0777, so root is functionally equivalent here.
-#   * ExecStart passes the config as CLI flags instead of relying on
-#     /etc/memryx/mxa_manager.conf. mxa_manager hardcodes that path (no
-#     --config flag) and exits `critical` if it's missing, but a sysext only
-#     merges /usr — it cannot ship /etc. main_linux.cpp reads the conf ONLY
-#     when argc <= 1; given any args it uses parse_command_line() and never
-#     touches /etc. The flag values below are the upstream conf defaults
-#     (LISTEN_ADDRESS / BASE_PORT / LOG_LEVEL / HW_MONITOR_INTERVAL).
+#   * mxa_manager hardcodes its config path to /etc/memryx/mxa_manager.conf
+#     (no --config flag) and the SDK 2.1 binary reads it UNCONDITIONALLY and
+#     exits `critical` if it's missing — passing CLI flags does not skip it
+#     (only newer MxAccl builds branch on argc). A sysext can't ship /etc, so
+#     the conf is bundled at /usr/lib/memryx/mxa_manager.conf and the first
+#     ExecStartPre below copies it into /etc/memryx/ on every start (TrueNAS
+#     /etc is writable; the copy is recreated each start, so it need not
+#     persist across reboots or TrueNAS updates).
 After=local-fs.target memryx-load.service
 Requires=memryx-load.service
 Before=docker.service
@@ -31,13 +32,16 @@ StartLimitIntervalSec=120
 
 [Service]
 Type=simple
+# Materialize the config the daemon hardcodes (see header). The bundled copy
+# lives in the merged sysext at /usr/lib/memryx/mxa_manager.conf.
+ExecStartPre=/bin/bash -c 'mkdir -p /etc/memryx && cp -f /usr/lib/memryx/mxa_manager.conf /etc/memryx/mxa_manager.conf'
 # Bounded wait for the device node the daemon manages. memryx-load.service
 # has already run (insmod), but udev may take a moment to create /dev/memx0.
 # Give it up to ~15s; if the card is absent the daemon would exit and
 # Restart=on-failure would land us in `failed` after the burst cap above,
 # rather than tight-looping.
 ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do [ -e /dev/memx0 ] && exit 0; sleep 1; done; echo "mxa-manager: /dev/memx0 not present after 15s" >&2; exit 1'
-ExecStart=/usr/bin/mxa_manager --addr /run/mxa_manager/ --port 10000 --log low --interval 500
+ExecStart=/usr/bin/mxa_manager
 Restart=on-failure
 RestartSec=2
 # Creates /run/mxa_manager (0777) — Frigate bind-mounts this into the

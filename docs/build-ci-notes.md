@@ -109,16 +109,20 @@ a broken sysext.
    resolved every userspace lib (`libmemx.so`, `libmx_accl.so.2`, …) against the
    TrueNAS rootfs after the sysext merge + `ldconfig`. No GLIBC issue.
 
-3. **`mxa_manager` config — resolved (r2).** `mxa_manager` hardcodes
-   `/etc/memryx/mxa_manager.conf` (no `--config` flag) and exits `critical` if
-   missing — which a sysext can't satisfy (no `/etc`). But `main_linux.cpp` reads
-   the conf ONLY when `argc <= 1`; given any CLI args it uses
-   `parse_command_line()` and never touches `/etc`. So `mxa-manager.service` now
-   passes the upstream conf defaults as flags
-   (`--addr /run/mxa_manager/ --port 10000 --log low --interval 500`). r1 shipped
-   the bare `ExecStart` and failed with "Config file not found"; r2+ is fixed.
-   (The optional `/etc/memryx/power.conf` read by `dfp_executor.cpp` is guarded by
-   an `exists()` check, so its absence is harmless.)
+3. **`mxa_manager` config — resolved (r3).** `mxa_manager` hardcodes
+   `/etc/memryx/mxa_manager.conf` (no `--config` flag) and the **SDK 2.1 binary
+   reads it unconditionally**, exiting `critical` if it's missing — which a sysext
+   can't satisfy directly (no `/etc`). The `argc`-based "skip the conf if given
+   CLI flags" branch in `main_linux.cpp` only exists in newer MxAccl (≥2.2); the
+   r2 attempt to pass flags was confirmed on hardware to **not** help on 2.1.
+   The working fix: bundle the conf in the sysext at
+   `/usr/lib/memryx/mxa_manager.conf` (taken from the `mxa-manager` deb, with a
+   built-in default fallback) and have an `ExecStartPre` copy it to
+   `/etc/memryx/mxa_manager.conf` on every start. `/etc` is writable on TrueNAS,
+   and the copy is recreated each start so it needn't persist. r1/r2 failed with
+   "Config file not found"; r3+ is fixed. (The optional `/etc/memryx/power.conf`
+   read by `dfp_executor.cpp` is guarded by an `exists()` check, so its absence is
+   harmless.)
 
 **Still to verify on hardware:**
 

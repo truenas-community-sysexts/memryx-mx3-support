@@ -648,6 +648,23 @@ jobs:
           # e.g. when hardware-testing a prerelease) ---
           cp scripts/memryx-lib.sh "${SYSEXT_ROOT}/usr/lib/memryx/memryx-lib.sh"
 
+          # --- mxa_manager config (bundled; the unit copies it to
+          # /etc/memryx/mxa_manager.conf on start). The SDK 2.1 mxa_manager
+          # reads that hardcoded path unconditionally and exits without it, and
+          # a sysext can't ship /etc. Prefer the conf the deb installs; fall
+          # back to the upstream defaults if the deb layout changes. ---
+          if [ -f "${STAGE}/etc/memryx/mxa_manager.conf" ]; then
+            cp "${STAGE}/etc/memryx/mxa_manager.conf" "${SYSEXT_ROOT}/usr/lib/memryx/mxa_manager.conf"
+          else
+            echo "::warning title=mxa-config::deb did not ship /etc/memryx/mxa_manager.conf; using built-in defaults"
+            printf '%s\n' \
+              'LISTEN_ADDRESS="/run/mxa_manager/"' \
+              'BASE_PORT=10000' \
+              'LOG_LEVEL=low' \
+              'HW_MONITOR_INTERVAL=500' \
+              > "${SYSEXT_ROOT}/usr/lib/memryx/mxa_manager.conf"
+          fi
+
           # NOTE: No depmod (would overwrite the base system's modules.dep via
           # overlayfs). memryx-load.service insmods the .ko directly.
           # NOTE: ldconfig is run by install.sh / the PREINIT script after the
@@ -712,6 +729,7 @@ jobs:
           require_file "usr/lib/udev/rules.d/51-memryx-udev.rules"
           require_file "usr/lib/memryx/memryx-preinit.sh"
           require_file "usr/lib/memryx/memryx-lib.sh"
+          require_file "usr/lib/memryx/mxa_manager.conf"
 
           # At least one libmemx*/libmx* ELF shared object.
           LIBMX_REL=$(cd "${SMOKE_TMP}/extract" && \

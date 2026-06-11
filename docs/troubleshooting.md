@@ -35,15 +35,16 @@ running and the container must see its socket.
 1. `systemctl status mxa-manager` — must be `active (running)`.
    - If it's failing, check `journalctl -u mxa-manager -b`. The unit waits up to
      ~15s for `/dev/memx0`; if the card is absent it lands in `failed`.
-   - **`[critical] Config file not found at /etc/memryx/mxa_manager.conf`** — this
-     was a bug in **r1**: `mxa_manager` reads that hardcoded path when launched
-     with no arguments, and a sysext can't ship `/etc`. Fixed in **r2+**, where the
-     unit passes the config as flags. To fix an r1 install, reinstall an r2+
-     release, or apply a tmpfs drop-in for the current boot:
+   - **`[critical] Config file not found at /etc/memryx/mxa_manager.conf`** — the
+     SDK 2.1 `mxa_manager` reads that hardcoded path unconditionally and a sysext
+     can't ship `/etc`. Fixed in **r3+**, where an `ExecStartPre` copies the
+     bundled conf into `/etc/memryx/` on every start. (r1/r2 hit this.) To fix an
+     older install, reinstall an r3+ release, or create the file by hand:
      ```bash
-     mkdir -p /run/systemd/system/mxa-manager.service.d
-     printf '[Service]\nExecStart=\nExecStart=/usr/bin/mxa_manager --addr /run/mxa_manager/ --port 10000 --log low --interval 500\n' \
-       > /run/systemd/system/mxa-manager.service.d/override.conf
+     mkdir -p /etc/memryx
+     printf '%s\n' 'LISTEN_ADDRESS="/run/mxa_manager/"' 'BASE_PORT=10000' 'LOG_LEVEL=low' 'HW_MONITOR_INTERVAL=500' \
+       > /etc/memryx/mxa_manager.conf
+     rm -rf /run/systemd/system/mxa-manager.service.d   # drop any earlier override
      systemctl daemon-reload && systemctl reset-failed mxa-manager && systemctl restart mxa-manager
      ```
 2. `ls /run/mxa_manager` — the socket directory must exist (the daemon creates it).

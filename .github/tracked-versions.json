@@ -1,11 +1,11 @@
 {
   "truenas": {
-    "version": "25.10.0",
+    "version": "25.10.4",
     "train": "Goldeye"
   },
   "memryx": {
-    "sdk": "2.0",
-    "driver_ref": "v2.0",
+    "sdk": "2.1",
+    "driver_ref": "v2.1.0",
     "driver_repo": "memryx/mx3_driver_pub",
     "apt_channel": "stable"
   }

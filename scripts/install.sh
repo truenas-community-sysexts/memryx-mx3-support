@@ -384,8 +384,11 @@ if [ -n "$PERSIST_PATH" ]; then
 fi
 
 # Source shared library (provides memryx_init_script_lookup).
-# Try the sibling file first (checkout or extracted release); fall back to
-# downloading from the release for the curl|bash case.
+# Resolution order: sibling file (checkout / extracted release dir) > the
+# bundled copy inside a local .raw > download from the promoted "latest"
+# release. The .raw fallback is what makes the piped form
+#   curl .../install.sh | sudo bash -s -- /path/to/memryx.raw
+# work for a PRE-RELEASE under hardware test, which has no "latest" asset yet.
 _source_memryx_lib() {
     local dir
     dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)" || dir=""
@@ -393,6 +396,20 @@ _source_memryx_lib() {
         # shellcheck source=scripts/memryx-lib.sh
         source "${dir}/memryx-lib.sh"
         return 0
+    fi
+    # Bundled inside a local .raw at usr/lib/memryx/memryx-lib.sh. LOCAL_RAW is
+    # set during arg parsing above, before this runs.
+    if [ -n "${LOCAL_RAW:-}" ] && [ -f "$LOCAL_RAW" ] && command -v unsquashfs >/dev/null 2>&1; then
+        local libtmp
+        libtmp=$(mktemp -d /tmp/memryx-lib-extract.XXXXXXXXXX)
+        if unsquashfs -q -d "${libtmp}/x" "$LOCAL_RAW" usr/lib/memryx/memryx-lib.sh >/dev/null 2>&1 \
+           && [ -f "${libtmp}/x/usr/lib/memryx/memryx-lib.sh" ]; then
+            # shellcheck source=scripts/memryx-lib.sh
+            source "${libtmp}/x/usr/lib/memryx/memryx-lib.sh"
+            rm -rf "$libtmp"
+            return 0
+        fi
+        rm -rf "$libtmp"
     fi
     local tmp
     tmp=$(mktemp /tmp/memryx-lib.XXXXXXXXXX)
@@ -408,8 +425,9 @@ _source_memryx_lib() {
     return 1
 }
 _source_memryx_lib || {
-    echo "ERROR: Could not load memryx-lib.sh (not found locally, download failed)." >&2
-    echo "  Run from the release directory, or ensure network access to GitHub." >&2
+    echo "ERROR: Could not load memryx-lib.sh (no sibling file, none bundled in the .raw, download failed)." >&2
+    echo "  Download it alongside install.sh from the same release and re-run, e.g.:" >&2
+    echo "    curl -fsSL <release-url>/memryx-lib.sh -o memryx-lib.sh" >&2
     exit 1
 }
 

@@ -643,6 +643,11 @@ jobs:
           cp scripts/memryx-preinit.sh "${SYSEXT_ROOT}/usr/lib/memryx/memryx-preinit.sh"
           chmod +x "${SYSEXT_ROOT}/usr/lib/memryx/memryx-preinit.sh"
 
+          # --- shared lib (bundled so install.sh run with a local .raw can
+          # source it without a promoted "latest" release to download from —
+          # e.g. when hardware-testing a prerelease) ---
+          cp scripts/memryx-lib.sh "${SYSEXT_ROOT}/usr/lib/memryx/memryx-lib.sh"
+
           # NOTE: No depmod (would overwrite the base system's modules.dep via
           # overlayfs). memryx-load.service insmods the .ko directly.
           # NOTE: ldconfig is run by install.sh / the PREINIT script after the
@@ -706,6 +711,7 @@ jobs:
           require_file "usr/lib/systemd/system/mxa-manager.service"
           require_file "usr/lib/udev/rules.d/51-memryx-udev.rules"
           require_file "usr/lib/memryx/memryx-preinit.sh"
+          require_file "usr/lib/memryx/memryx-lib.sh"
 
           # At least one libmemx*/libmx* ELF shared object.
           LIBMX_REL=$(cd "${SMOKE_TMP}/extract" && \
@@ -931,11 +937,14 @@ jobs:
                 `**MemryX SDK:** ${process.env.MEMRYX_SDK}`,
                 ``,
                 `### Install THIS build to test it`,
-                `It is a **pre-release**, so the default \`latest\` install (and version auto-resolve) skip it. Install this exact build:`,
+                `It is a **pre-release**, so the default \`latest\` install (and version auto-resolve) skip it. Download this exact build's scripts alongside the image and run from that directory (a pre-release has no \`latest\` asset for the piped form to fetch the shared lib from):`,
                 "```bash",
                 `BASE=https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`,
-                `curl -fsSL "$BASE/memryx.raw" -o /tmp/memryx.raw`,
-                `curl -fsSL "$BASE/install.sh" | sudo bash -s -- /tmp/memryx.raw`,
+                `mkdir -p /tmp/memryx-test && cd /tmp/memryx-test`,
+                `curl -fsSL "$BASE/memryx.raw"      -o memryx.raw`,
+                `curl -fsSL "$BASE/install.sh"      -o install.sh`,
+                `curl -fsSL "$BASE/memryx-lib.sh"   -o memryx-lib.sh`,
+                `sudo bash install.sh memryx.raw`,
                 "```",
                 ``,
                 `### Test checklist`,

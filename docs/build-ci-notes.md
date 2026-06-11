@@ -86,19 +86,31 @@ in `lint.yml`.
 - `mark_latest=true` (manual dispatch) skips the gate and publishes straight to
   Latest.
 
-## Open verification items (confirm on first hardware run)
+## Verification status
 
-These are best-effort and intentionally fail-loud in `build.yml`; the
-prerelease + hardware-test gate exists precisely to catch them before users do.
+The first end-to-end build (`v25.10.4-memryx2.1-r1`, kernel
+`6.12.91-production+truenas`) ran green, which already confirms the build-time
+items below. The remaining ones are runtime/hardware concerns the build can't
+exercise; the prerelease + hardware-test gate exists to catch them before users
+do, and every assembly assumption fails loud in `build.yml` rather than shipping
+a broken sysext.
 
-1. **Exact deb file layout.** The assembly step globs for `libmemx*`/`libmx*`
-   shared objects and `usr/bin/mxa_manager`. If MemryX renames or relocates these
-   in a future SDK, the build fails loudly rather than shipping a broken sysext —
-   adjust the globs then.
+**Confirmed by the first build:**
+
+1. **Deb file layout.** The apt pool served `memx-drivers 2.1.1-1.1`,
+   `memx-accl 2.1.2-1`, `mxa-manager 2.1.1-1`; the assembly globs picked up
+   `libmemx.so(.2.1.1)`, `libmx_accl.so(.2)`, `usr/bin/mxa_manager` (+ bonus
+   `acclBench`) and all four `cascade*.bin` firmware blobs, and the smoke-test
+   passed (paths present, binaries ELF, module vermagic matches the kernel). If a
+   future SDK renames/relocates these the build fails loudly — adjust the globs then.
+
+**Still to verify on hardware:**
+
 2. **GLIBC compatibility.** The userspace debs are MemryX-built (Ubuntu/Debian
-   baseline). They are assumed ≤ the TrueNAS rootfs GLIBC. If a binary fails to
-   load on the target, pin the runner/SDK accordingly or rebuild `mx_accl` from
-   the MPL source on the matched runner.
+   baseline) and unpacked cleanly on the runner, but actual loading against the
+   TrueNAS rootfs GLIBC is unverified. If a binary fails to load on the target,
+   pin the runner/SDK accordingly or rebuild `mx_accl` from the MPL source on the
+   matched runner.
 3. **`mxa_manager` config.** Upstream installs `/etc/memryx/mxa_manager.conf`, but
    a sysext cannot ship `/etc`. The unit currently runs the daemon with its
    built-in defaults. If it needs the conf, drop it to `/etc/memryx/` from

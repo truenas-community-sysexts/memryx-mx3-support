@@ -104,17 +104,24 @@ a broken sysext.
    passed (paths present, binaries ELF, module vermagic matches the kernel). If a
    future SDK renames/relocates these the build fails loudly — adjust the globs then.
 
+2. **GLIBC compatibility — confirmed on hardware (r1).** The module loaded
+   (`/dev/memx0` + `/dev/memx0_feature` created) and `ldd /usr/bin/mxa_manager`
+   resolved every userspace lib (`libmemx.so`, `libmx_accl.so.2`, …) against the
+   TrueNAS rootfs after the sysext merge + `ldconfig`. No GLIBC issue.
+
+3. **`mxa_manager` config — resolved (r2).** `mxa_manager` hardcodes
+   `/etc/memryx/mxa_manager.conf` (no `--config` flag) and exits `critical` if
+   missing — which a sysext can't satisfy (no `/etc`). But `main_linux.cpp` reads
+   the conf ONLY when `argc <= 1`; given any CLI args it uses
+   `parse_command_line()` and never touches `/etc`. So `mxa-manager.service` now
+   passes the upstream conf defaults as flags
+   (`--addr /run/mxa_manager/ --port 10000 --log low --interval 500`). r1 shipped
+   the bare `ExecStart` and failed with "Config file not found"; r2+ is fixed.
+   (The optional `/etc/memryx/power.conf` read by `dfp_executor.cpp` is guarded by
+   an `exists()` check, so its absence is harmless.)
+
 **Still to verify on hardware:**
 
-2. **GLIBC compatibility.** The userspace debs are MemryX-built (Ubuntu/Debian
-   baseline) and unpacked cleanly on the runner, but actual loading against the
-   TrueNAS rootfs GLIBC is unverified. If a binary fails to load on the target,
-   pin the runner/SDK accordingly or rebuild `mx_accl` from the MPL source on the
-   matched runner.
-3. **`mxa_manager` config.** Upstream installs `/etc/memryx/mxa_manager.conf`, but
-   a sysext cannot ship `/etc`. The unit currently runs the daemon with its
-   built-in defaults. If it needs the conf, drop it to `/etc/memryx/` from
-   `install.sh`.
 4. **Firmware path / flashing.** The M.2 is a QSPI-flash-boot board, so the
    kernel only `request_firmware()`s `cascade.bin` for host-load boards. We bundle
    all `cascade*.bin` to `/usr/lib/firmware`. On-board QSPI re-flashing (via the

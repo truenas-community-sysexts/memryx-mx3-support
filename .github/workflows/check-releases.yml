@@ -1,0 +1,408 @@
+name: Check for New Releases
+
+on:
+  schedule:
+    - cron: '0 6 * * *'  # Daily at 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+# Serialize manual dispatches against the scheduled run so two concurrent
+# invocations cannot race on the commit/push of tracked-versions.json.
+concurrency:
+  group: check-releases
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Mint a short-lived token from sysext-ci-automation-app (in the
+      # default-branch ruleset bypass list) to push tracked-versions.json back
+      # to main; the default GITHUB_TOKEN's github-actions[bot] is not exempt.
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      # -----------------------------------------------------------------------
+      # Read current tracked state.
+      # -----------------------------------------------------------------------
+      - name: Read tracked versions
+        id: tracked
+        run: |
+          set -o pipefail
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('.github/tracked-versions.json') as f:
+              s = json.load(f)
+          print(f"truenas_version={s['truenas']['version']}")
+          print(f"train={s['truenas']['train']}")
+          print(f"memryx_sdk={s['memryx']['sdk']}")
+          print(f"driver_ref={s['memryx']['driver_ref']}")
+          print(f"driver_repo={s['memryx'].get('driver_repo', 'memryx/mx3_driver_pub')}")
+          PY
+
+      # -----------------------------------------------------------------------
+      # TrueNAS check: pick the latest stable scale-build tag, resolve its
+      # train from the download.truenas.com listing, and gate on the matching
+      # ISO actually being published. Tags can land hours or days before the
+      # ISO; defer the bump rather than fail mid-build. (Identical to the
+      # sibling sysexts.)
+      # -----------------------------------------------------------------------
+      - name: Check for new TrueNAS release
+        id: truenas
+        env:
+          CURRENT_VERSION: ${{ steps.tracked.outputs.truenas_version }}
+          CURRENT_TRAIN: ${{ steps.tracked.outputs.train }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          echo "Currently tracked: ${CURRENT_VERSION} on train ${CURRENT_TRAIN}"
+
+          if ! TAGS_JSON=$(curl -fsSL "https://api.github.com/repos/truenas/scale-build/tags?per_page=100" \
+              -H "Authorization: Bearer ${GH_TOKEN}"); then
+            echo "::error title=TrueNAS check::failed to fetch scale-build tags"
+            exit 1
+          fi
+
+          LATEST_TAG=$(printf '%s' "$TAGS_JSON" | python3 -c "
+          import sys, json, re
+          tags = json.load(sys.stdin)
+          stable_re = re.compile(r'^TS-(\d+(?:\.\d+)+)$')
+          stable = [(m.group(1), t['name']) for t in tags
+                    if (m := stable_re.match(t['name']))]
+          if not stable:
+              sys.exit(0)
+          stable.sort(key=lambda v: [int(p) for p in v[0].split('.')])
+          print(stable[-1][1])
+          ")
+
+          if [ -z "$LATEST_TAG" ]; then
+            echo "::error title=TrueNAS check::no stable tags found in scale-build (parser likely broken)"
+            exit 1
+          fi
+
+          LATEST_VERSION="${LATEST_TAG#TS-}"
+          echo "Latest scale-build tag: ${LATEST_TAG} (version: ${LATEST_VERSION})"
+
+          if [ "$LATEST_VERSION" = "$CURRENT_VERSION" ]; then
+            echo "No new TrueNAS release"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          HIGHER=$(printf '%s\n%s\n' "$CURRENT_VERSION" "$LATEST_VERSION" | python3 -c "
+          import sys
+          versions = [line.strip() for line in sys.stdin if line.strip()]
+          versions.sort(key=lambda v: [int(p) for p in v.split('.')])
+          print(versions[-1])
+          ")
+          if [ "$HIGHER" != "$LATEST_VERSION" ]; then
+            echo "Latest tag ${LATEST_VERSION} is not higher than tracked ${CURRENT_VERSION} -- ignoring"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! LISTING=$(curl -fsSL "https://download.truenas.com/"); then
+            echo "::error title=TrueNAS check::failed to fetch download.truenas.com listing"
+            exit 1
+          fi
+
+          TRAIN_COUNT=$(printf '%s' "$LISTING" | python3 -c "
+          import sys, re
+          trains = sorted(set(re.findall(r'TrueNAS-SCALE-([A-Z][a-zA-Z]+)/', sys.stdin.read())))
+          print(len(trains))
+          ")
+          if [ "$TRAIN_COUNT" -lt 3 ]; then
+            echo "::error title=TrueNAS check::download.truenas.com listing has only ${TRAIN_COUNT} train references -- looks broken or rate-limited"
+            exit 1
+          fi
+
+          MATCHED_TRAINS=$(printf '%s' "$LISTING" | LATEST_VERSION="$LATEST_VERSION" python3 -c "
+          import sys, os, re
+          version = os.environ['LATEST_VERSION']
+          listing = sys.stdin.read()
+          pattern = re.compile(r'TrueNAS-SCALE-([A-Z][a-zA-Z]+)/' + re.escape(version) + r'/')
+          for t in sorted(set(pattern.findall(listing))):
+              print(t)
+          ")
+
+          NUM_MATCHES=$(printf '%s' "$MATCHED_TRAINS" | python3 -c "
+          import sys
+          print(sum(1 for line in sys.stdin if line.strip()))
+          ")
+
+          if [ "$NUM_MATCHES" -eq 0 ]; then
+            echo "Tag ${LATEST_VERSION} found in scale-build, but not yet listed on download.truenas.com under any train. Will retry on next scheduled run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NUM_MATCHES" -gt 1 ]; then
+            echo "::error title=TrueNAS check::version ${LATEST_VERSION} appears under multiple trains -- refusing to guess"
+            echo "Matched trains:" >&2
+            printf '%s' "$MATCHED_TRAINS" | sed 's/^/  /' >&2
+            exit 1
+          fi
+
+          NEW_TRAIN=$(printf '%s' "$MATCHED_TRAINS" | python3 -c "
+          import sys
+          for line in sys.stdin:
+              s = line.strip()
+              if s:
+                  print(s)
+                  break
+          ")
+          echo "Resolved train for ${LATEST_VERSION}: ${NEW_TRAIN}"
+
+          ISO_URL="https://download.truenas.com/TrueNAS-SCALE-${NEW_TRAIN}/${LATEST_VERSION}/TrueNAS-SCALE-${LATEST_VERSION}.iso"
+          if ! curl -fsI "$ISO_URL" >/dev/null 2>&1; then
+            echo "ISO not yet published at ${ISO_URL}. Will retry on next scheduled run."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$NEW_TRAIN" != "$CURRENT_TRAIN" ]; then
+            echo "::notice title=TrueNAS train rollover::train moved from ${CURRENT_TRAIN} to ${NEW_TRAIN} (version ${LATEST_VERSION})"
+          fi
+
+          echo "New TrueNAS release detected, train resolved, ISO is published."
+          {
+            echo "changed=true"
+            echo "version=${LATEST_VERSION}"
+            echo "train=${NEW_TRAIN}"
+          } >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # MemryX check: Frigate is the consumer this sysext exists to serve, and
+      # Frigate explicitly supports ONE MemryX SDK at a time ("use MemryX SDK
+      # 2.1 only"). So the target SDK is whatever Frigate's host install script
+      # pins, exactly like the Hailo sysext caps at Frigate's HailoRT pin.
+      # We parse docker/memryx/user_installation.sh on the dev branch for the
+      # `memx-drivers=<sdk>.*` pin, then resolve the matching driver-source tag
+      # in mx3_driver_pub so the kernel module and the userspace debs stay on
+      # the same SDK.
+      # -----------------------------------------------------------------------
+      - name: Check Frigate-pinned MemryX SDK
+        id: memryx
+        env:
+          CURRENT_SDK: ${{ steps.tracked.outputs.memryx_sdk }}
+          CURRENT_REF: ${{ steps.tracked.outputs.driver_ref }}
+          DRIVER_REPO: ${{ steps.tracked.outputs.driver_repo }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          echo "Currently tracked MemryX SDK: ${CURRENT_SDK} (driver ${CURRENT_REF} from ${DRIVER_REPO})"
+
+          # --- Parse Frigate's MemryX install script for the pinned SDK ---
+          # Lines look like:
+          #   sudo apt install -y memx-drivers=2.1.* memx-accl=2.1.* mxa-manager=2.1.*
+          # We extract the memx-drivers pin and reduce it to major.minor.
+          parse_frigate_sdk() {
+            local url="$1" content value
+            if ! content=$(curl -fsSL "$url"); then
+              echo "::error title=Frigate pin parser::curl failed fetching ${url}" >&2
+              return 1
+            fi
+            value=$(printf '%s\n' "$content" \
+              | grep -oE 'memx-drivers=[0-9]+\.[0-9]+' \
+              | head -1 \
+              | sed -E 's/^memx-drivers=//')
+            if [ -z "$value" ]; then
+              echo "::error title=Frigate pin parser::no 'memx-drivers=<ver>' pin found in ${url}" >&2
+              return 1
+            fi
+            if ! printf '%s' "$value" | grep -qE '^[0-9]+\.[0-9]+$'; then
+              echo "::error title=Frigate pin parser::parsed SDK pin is not X.Y: '${value}'" >&2
+              return 1
+            fi
+            printf '%s' "$value"
+          }
+
+          if ! FRIGATE_SDK=$(parse_frigate_sdk \
+              "https://raw.githubusercontent.com/blakeblackshear/frigate/dev/docker/memryx/user_installation.sh"); then
+            echo "::error title=Frigate pin parser::failed to parse docker/memryx/user_installation.sh -- refusing to bump"
+            exit 1
+          fi
+          echo "Frigate-pinned MemryX SDK: ${FRIGATE_SDK}"
+
+          if [ "$FRIGATE_SDK" = "$CURRENT_SDK" ]; then
+            echo "No change in Frigate's pinned SDK"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # --- Resolve the mx3_driver_pub source tag for the new SDK ---
+          # Pick the highest tag whose major.minor matches FRIGATE_SDK
+          # (e.g. SDK 2.1 -> v2.1.0). The kernel module is built from this tag.
+          if ! TAGS_JSON=$(curl -fsSL "https://api.github.com/repos/${DRIVER_REPO}/tags?per_page=100" \
+              -H "Authorization: Bearer ${GH_TOKEN}"); then
+            echo "::error title=MemryX check::failed to fetch tags from ${DRIVER_REPO}"
+            exit 1
+          fi
+          NEW_REF=$(printf '%s' "$TAGS_JSON" | FRIGATE_SDK="$FRIGATE_SDK" python3 -c "
+          import sys, json, os, re
+          sdk = os.environ['FRIGATE_SDK']
+          major, minor = sdk.split('.')
+          tags = json.load(sys.stdin)
+          rx = re.compile(r'^v?(' + re.escape(major) + r')\.(' + re.escape(minor) + r')(?:\.(\d+))?$')
+          matches = []
+          for t in tags:
+              m = rx.match(t['name'])
+              if m:
+                  patch = int(m.group(3)) if m.group(3) else 0
+                  matches.append((patch, t['name']))
+          if matches:
+              matches.sort()
+              print(matches[-1][1])
+          ")
+          if [ -z "$NEW_REF" ]; then
+            echo "::error title=MemryX check::Frigate pinned SDK ${FRIGATE_SDK} but no matching tag (v${FRIGATE_SDK}.x) exists yet in ${DRIVER_REPO}. Will retry; the driver source mirror may not be tagged yet."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Resolved driver source tag for SDK ${FRIGATE_SDK}: ${NEW_REF}"
+
+          echo "Frigate moved to MemryX SDK ${FRIGATE_SDK} (was ${CURRENT_SDK})."
+          {
+            echo "changed=true"
+            echo "sdk=${FRIGATE_SDK}"
+            echo "driver_ref=${NEW_REF}"
+          } >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # If either upstream moved, resolve the runner. When only MemryX changed,
+      # the TrueNAS version is unchanged so we use the current tracked values.
+      # -----------------------------------------------------------------------
+      - name: Resolve build runner
+        id: runner
+        if: steps.truenas.outputs.changed == 'true' || steps.memryx.outputs.changed == 'true'
+        run: |
+          if [ "${{ steps.truenas.outputs.changed }}" = "true" ]; then
+            TRAIN="${{ steps.truenas.outputs.train }}"
+            VERSION="${{ steps.truenas.outputs.version }}"
+          else
+            TRAIN="${{ steps.tracked.outputs.train }}"
+            VERSION="${{ steps.tracked.outputs.truenas_version }}"
+          fi
+          RUNNER=$(.github/scripts/resolve-runner.sh "$TRAIN" "$VERSION")
+          echo "runner=${RUNNER}" >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Single commit covering whichever fields moved. The state file is
+      # rewritten in place; build.yml reads it at runtime so no workflow file
+      # changes are needed.
+      # -----------------------------------------------------------------------
+      - name: Update tracked-versions
+        id: write
+        if: steps.truenas.outputs.changed == 'true' || steps.memryx.outputs.changed == 'true'
+        env:
+          TRUENAS_CHANGED: ${{ steps.truenas.outputs.changed }}
+          NEW_TRUENAS_VERSION: ${{ steps.truenas.outputs.version }}
+          NEW_TRAIN: ${{ steps.truenas.outputs.train }}
+          CURRENT_TRAIN: ${{ steps.tracked.outputs.train }}
+          MEMRYX_CHANGED: ${{ steps.memryx.outputs.changed }}
+          NEW_SDK: ${{ steps.memryx.outputs.sdk }}
+          NEW_DRIVER_REF: ${{ steps.memryx.outputs.driver_ref }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json, os
+          with open('.github/tracked-versions.json') as f:
+              s = json.load(f)
+          if os.environ.get('TRUENAS_CHANGED') == 'true':
+              s['truenas']['version'] = os.environ['NEW_TRUENAS_VERSION']
+              s['truenas']['train']   = os.environ['NEW_TRAIN']
+          if os.environ.get('MEMRYX_CHANGED') == 'true':
+              s['memryx']['sdk']        = os.environ['NEW_SDK']
+              s['memryx']['driver_ref'] = os.environ['NEW_DRIVER_REF']
+          with open('.github/tracked-versions.json', 'w') as f:
+              json.dump(s, f, indent=2)
+              f.write('\n')
+          PY
+
+          PARTS=()
+          if [ "$TRUENAS_CHANGED" = "true" ]; then
+            if [ "$NEW_TRAIN" != "$CURRENT_TRAIN" ]; then
+              PARTS+=("TrueNAS version to ${NEW_TRUENAS_VERSION} (train: ${NEW_TRAIN})")
+            else
+              PARTS+=("TrueNAS version to ${NEW_TRUENAS_VERSION}")
+            fi
+          fi
+          if [ "$MEMRYX_CHANGED" = "true" ]; then
+            PARTS+=("MemryX SDK to ${NEW_SDK} (driver ${NEW_DRIVER_REF})")
+          fi
+          MSG="Update tracked $(IFS=', '; echo "${PARTS[*]}")"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/tracked-versions.json
+          git commit -m "$MSG" || {
+            echo "ERROR: Failed to commit tracked-versions update"
+            exit 1
+          }
+          if ! git push; then
+            echo "Push failed, attempting rebase and retry..."
+            git pull --rebase || {
+              echo "::error title=Push failed::git pull --rebase failed after push rejection"
+              exit 1
+            }
+            git push || {
+              echo "::error title=Push failed::git push failed after rebase retry"
+              exit 1
+            }
+          fi
+
+          # Output final values (post-write) for the dispatch step.
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          with open('.github/tracked-versions.json') as f:
+              s = json.load(f)
+          print(f"truenas_version={s['truenas']['version']}")
+          print(f"train={s['truenas']['train']}")
+          print(f"memryx_sdk={s['memryx']['sdk']}")
+          print(f"driver_ref={s['memryx']['driver_ref']}")
+          print(f"driver_repo={s['memryx'].get('driver_repo', 'memryx/mx3_driver_pub')}")
+          print(f"apt_channel={s['memryx'].get('apt_channel', 'stable')}")
+          PY
+
+      # -----------------------------------------------------------------------
+      # Dispatch build.yml with the post-update values. mark_latest='false' is
+      # the gate that prevents an unverified auto-build from displacing the
+      # human-promoted Latest release.
+      # -----------------------------------------------------------------------
+      - name: Trigger build
+        if: steps.truenas.outputs.changed == 'true' || steps.memryx.outputs.changed == 'true'
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ steps.app-token.outputs.token }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'build.yml',
+              ref: 'main',
+              inputs: {
+                truenas_version: '${{ steps.write.outputs.truenas_version }}',
+                memryx_sdk:      '${{ steps.write.outputs.memryx_sdk }}',
+                driver_ref:      '${{ steps.write.outputs.driver_ref }}',
+                driver_repo:     '${{ steps.write.outputs.driver_repo }}',
+                apt_channel:     '${{ steps.write.outputs.apt_channel }}',
+                train_name:      '${{ steps.write.outputs.train }}',
+                runner:          '${{ steps.runner.outputs.runner }}',
+                mark_latest:     'false'
+              }
+            });
+            console.log('Dispatched build.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }}), MemryX SDK ${{ steps.write.outputs.memryx_sdk }} (driver ${{ steps.write.outputs.driver_ref }}), runner ${{ steps.runner.outputs.runner }}');

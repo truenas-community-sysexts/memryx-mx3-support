@@ -1,0 +1,42 @@
+[Unit]
+Description=MemryX MX3 device management daemon (mxa-manager)
+# Adapted from MemryX's upstream debian_manager/mxa-manager.service
+# (memryx/MxAccl). Differences from upstream, for the TrueNAS sysext context:
+#   * After=memryx-load.service — the daemon opens /dev/memx0, which the
+#     sibling oneshot insmods. Upstream relies on the module already being
+#     present from a DKMS install; here we load it ourselves on boot.
+#   * Before=docker.service — Frigate (and any MX3 container) connects to the
+#     /run/mxa_manager socket this daemon creates. TrueNAS apps boot as
+#     docker `restart=unless-stopped` containers, so a container that starts
+#     before the socket exists would fail to reach the accelerator. The
+#     sibling sysexts (hailo-load, coral-load, nvidia-mig-setup) order
+#     themselves Before=docker.service the same way.
+#   * User=root instead of upstream's dedicated `mxa-manager` sysuser: a
+#     sysext-shipped sysusers.d entry isn't reliably created before the
+#     sysext is merged by the PREINIT path on TrueNAS, so the dedicated user
+#     may not exist when this unit starts. /dev/memx0 is 0666 and
+#     /run/mxa_manager is 0777, so root is functionally equivalent here.
+After=local-fs.target memryx-load.service
+Requires=memryx-load.service
+Before=docker.service
+StartLimitBurst=5
+StartLimitIntervalSec=120
+
+[Service]
+Type=simple
+# Bounded wait for the device node the daemon manages. memryx-load.service
+# has already run (insmod), but udev may take a moment to create /dev/memx0.
+# Give it up to ~15s; if the card is absent the daemon would exit and
+# Restart=on-failure would land us in `failed` after the burst cap above,
+# rather than tight-looping.
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 15); do [ -e /dev/memx0 ] && exit 0; sleep 1; done; echo "mxa-manager: /dev/memx0 not present after 15s" >&2; exit 1'
+ExecStart=/usr/bin/mxa_manager
+Restart=on-failure
+RestartSec=2
+# Creates /run/mxa_manager (0777) — Frigate bind-mounts this into the
+# container (-v /run/mxa_manager:/run/mxa_manager).
+RuntimeDirectory=mxa_manager
+RuntimeDirectoryMode=0777
+
+[Install]
+WantedBy=multi-user.target

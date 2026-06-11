@@ -1,0 +1,10 @@
+# MemryX MX3 AI accelerator - allow non-root access to /dev/memx*
+#
+# The in-tree driver rule (kdriver/60-memx-drivers.rules in
+# memryx/mx3_driver_pub) is `KERNEL=="memx*", MODE="0666"`. We mirror that:
+# MODE 0666 grants world read/write so Docker containers (which typically run
+# as non-root, e.g. Frigate) can open /dev/memx0 without extra group config.
+# Trade-off: any local user can talk to the accelerator. For a locked-down
+# alternative, use GROUP="video" with MODE="0660" and add your container user
+# to the video group.
+KERNEL=="memx*", MODE="0666"

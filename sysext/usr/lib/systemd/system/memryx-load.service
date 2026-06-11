@@ -1,0 +1,26 @@
+[Unit]
+Description=MemryX MX3 PCIe driver load
+After=local-fs.target systemd-modules-load.service
+Before=docker.service mxa-manager.service
+# Cap restart loop on permanent failures (e.g. version mismatch after a
+# TrueNAS update, missing PCIe device). Without these, Restart=on-failure
+# + RestartSec=5s tight-loops insmod every 5 seconds forever and floods the
+# journal. With burst=3/interval=60s the unit lands in `failed` after ~15s.
+StartLimitBurst=3
+StartLimitIntervalSec=60
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Skip insmod when the PREINIT script has already loaded the module, but
+# still surface a real insmod failure (e.g. version mismatch) when the
+# module isn't loaded. Don't use `ExecStart=-` here: that would swallow
+# every failure including legitimate ones. /lib/modules is read-only on
+# TrueNAS so depmod/modprobe can't be used — insmod the .ko directly.
+ExecStart=/bin/bash -c '[ -e /sys/module/memx_cascade_plus_pcie ] || /sbin/insmod /usr/lib/modules/$(uname -r)/extra/memx_cascade_plus_pcie.ko'
+ExecStart=-/usr/bin/udevadm trigger --subsystem-match=memx
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

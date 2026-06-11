@@ -1,0 +1,166 @@
+# MemryX MX3 Sysext for TrueNAS
+
+A [systemd-sysext](https://www.freedesktop.org/software/systemd/man/latest/systemd-sysext.html)
+package that adds [MemryX MX3](https://memryx.com/) M.2 AI accelerator support to
+TrueNAS SCALE. Primarily useful for running [Frigate NVR](https://frigate.video/)
+with hardware-accelerated AI object detection (Frigate's `memryx` detector).
+
+Unlike a typical accelerator that only needs a kernel module + device node, the
+MX3 stack is a **daemon-mediated** design: applications don't talk to `/dev/memx0`
+directly — they connect to the **`mxa-manager`** daemon over a `/run/mxa_manager`
+socket. So this sysext ships the full host stack: the kernel module, the MemryX
+userspace runtime, the `mxa-manager` daemon (as a systemd service), the firmware,
+and udev rules.
+
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [Quick Start](#quick-start) | Install, verify, uninstall |
+| [docs/install.md](docs/install.md) | Install options, persistence, scripts reference |
+| [docs/architecture.md](docs/architecture.md) | Sysext structure, the daemon model, build pipeline, read-only constraints |
+| [docs/build-ci-notes.md](docs/build-ci-notes.md) | Build process, the source-vs-deb split, automated updates, open verification items |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Kernel mismatch recovery, daemon issues |
+
+## What's Included
+
+The `memryx.raw` sysext contains:
+
+| Component | Description | Source / License |
+| --- | --- | --- |
+| `memx_cascade_plus_pcie.ko` | MX3 PCIe kernel module (built for the exact TrueNAS kernel) | [mx3_driver_pub](https://github.com/memryx/mx3_driver_pub), GPLv2 |
+| `libmemx*` / `libmx*` | Userspace C API + `mx_accl` C++ runtime | MemryX `memx-drivers`/`memx-accl` debs; GPLv2 / MPL-2.0 |
+| `mxa_manager` + `mxa-manager.service` | Device-management daemon, exposes `/run/mxa_manager` | [MxAccl](https://github.com/memryx/MxAccl), MPL-2.0 |
+| `memryx-load.service` | Loads the kernel module on boot (oneshot) | this repo, MIT |
+| `cascade*.bin` | MX3 firmware blobs | MemryX firmware license (redistributable exact copies) |
+| `51-memryx-udev.rules` | `/dev/memx*` permissions (`0666`) | this repo, MIT |
+
+Everything is bundled in the sysext — there is **no install-time download from
+MemryX**.
+
+## Compatibility
+
+| Device | Supported | Notes |
+| --- | --- | --- |
+| MemryX MX3 M.2 module | Yes | PCIe, primary target. Creates `/dev/memx0`. |
+| MemryX MX3 mini-PCIe / carrier boards | Likely | Same PCIe driver; not yet hardware-verified here |
+| MemryX MX3 USB accelerator | No | Different path; no PCIe kernel module needed |
+
+**Frigate compatibility is SDK-pinned.** Frigate's stable release supports exactly
+one MemryX SDK at a time (currently **SDK 2.1**). CI tracks
+[Frigate's `docker/memryx/user_installation.sh`](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh)
+and builds the SDK it pins, exactly the way the sibling Hailo sysext caps at
+Frigate's HailoRT pin. The current target is recorded in
+[`.github/tracked-versions.json`](.github/tracked-versions.json).
+
+## Quick Start
+
+### Prerequisites
+
+- TrueNAS 25.10 or newer (current target recorded in [`.github/tracked-versions.json`](.github/tracked-versions.json), tracked automatically)
+- MemryX MX3 installed and visible: `lspci -d 1fe9:` (MemryX vendor ID `1fe9`)
+- Root/sudo access
+- Internet access (to download the release)
+
+### Install
+
+Auto-detects your TrueNAS version, downloads the matching release, sets up
+persistence, loads the module, and starts the `mxa-manager` daemon:
+
+```bash
+curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/install.sh | sudo bash
+```
+
+With an explicit pool for persistence:
+
+```bash
+curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/install.sh -o install.sh
+sudo bash install.sh --pool=fast
+```
+
+> **Version matching:** each release is built for a specific TrueNAS kernel. The
+> install script auto-detects your version and downloads the correct release.
+
+### Verify
+
+Run the built-in status probe:
+
+```bash
+curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/install.sh | sudo bash -s -- --check
+```
+
+Or check manually:
+
+```bash
+ls /dev/memx0                              # device node present
+lsmod | grep memx_cascade_plus_pcie        # module loaded
+systemctl status mxa-manager               # daemon active
+ls /run/mxa_manager                        # socket dir present
+```
+
+### Uninstall
+
+```bash
+curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/uninstall.sh | sudo bash
+```
+
+## Using with Frigate
+
+Frigate's `memryx` detector connects to the host daemon, so the container needs
+the device **and** the manager socket (and privileged mode):
+
+### 1. Pass through the device and socket
+
+In TrueNAS Apps (or docker-compose), add:
+
+```yaml
+devices:
+  - /dev/memx0
+volumes:
+  - /run/mxa_manager:/run/mxa_manager
+privileged: true
+```
+
+### 2. Configure the detector
+
+In your Frigate `config.yaml`:
+
+```yaml
+detectors:
+  memryx:
+    type: memryx
+```
+
+`.dfp` models are downloaded by Frigate at runtime. See the
+[MemryX + Frigate guide](https://devblog.memryx.com/memryx-frigate-manual-setup/)
+for model configuration.
+
+## Important Notes
+
+- **Use the Frigate-pinned SDK only.** Frigate explicitly supports a single SDK
+  version; mixing a newer driver/runtime than Frigate expects breaks the detector.
+  CI handles this for you by tracking Frigate's pin.
+- The kernel module must match the exact TrueNAS kernel version. If you update
+  TrueNAS, you need a matching sysext build. See [troubleshooting](docs/troubleshooting.md).
+- The unsigned kernel module may require disabling Secure Boot.
+- Firmware is bundled and redistributable — no MemryX download at install time.
+  The on-board QSPI flash is **not** re-flashed automatically; see
+  [docs/troubleshooting.md](docs/troubleshooting.md) if the firmware version is
+  reported as mismatched.
+
+## License
+
+**MIT** ([LICENSE](LICENSE)) for all first-party code in this repository (scripts,
+workflows, systemd units, udev rules).
+
+Bundled third-party components keep their upstream licenses: the kernel module is
+GPLv2 ([mx3_driver_pub](https://github.com/memryx/mx3_driver_pub)); the runtime and
+`mxa-manager` are MPL-2.0 ([MxAccl](https://github.com/memryx/MxAccl)); the firmware
+blobs are redistributable exact copies under MemryX's firmware license. See
+[docs/architecture.md](docs/architecture.md#licensing) for the per-artifact breakdown.
+
+## Credits
+
+- [truenas-community-sysexts/hailo8-support](https://github.com/truenas-community-sysexts/hailo8-support) and [coral-pcie-support](https://github.com/truenas-community-sysexts/coral-pcie-support) — project structure, scripts, and CI workflows adapted from scyto's sibling accelerator sysexts
+- [memryx/mx3_driver_pub](https://github.com/memryx/mx3_driver_pub) — MX3 kernel driver source mirror
+- [memryx/MxAccl](https://github.com/memryx/MxAccl) — MemryX C++ runtime + `mxa-manager` daemon

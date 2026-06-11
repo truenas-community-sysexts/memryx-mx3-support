@@ -1,0 +1,953 @@
+name: Build MemryX Sysext
+
+on:
+  workflow_dispatch:
+    inputs:
+      truenas_version:
+        description: 'TrueNAS version (leave blank for latest tracked)'
+        required: false
+        default: ''
+      memryx_sdk:
+        description: 'MemryX SDK major.minor for the userspace debs (e.g. 2.1; blank = latest tracked)'
+        required: false
+        default: ''
+      driver_ref:
+        description: 'mx3_driver_pub git ref to build the kernel module from (blank = latest tracked)'
+        required: false
+        default: ''
+      driver_repo:
+        description: 'mx3_driver_pub repo (blank = latest tracked)'
+        required: false
+        default: ''
+      apt_channel:
+        description: 'MemryX apt channel: stable | early_access (blank = latest tracked)'
+        required: false
+        default: ''
+      train_name:
+        description: 'Train name (leave blank for latest tracked)'
+        required: false
+        default: ''
+      runner:
+        description: 'GitHub Actions runner (leave blank to auto-resolve from TrueNAS release)'
+        required: false
+        default: ''
+      mark_latest:
+        description: 'true = publish straight to Latest; false (default) = prerelease + hardware-test gate'
+        required: false
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+        default: 'false'
+
+  workflow_call:
+    inputs:
+      truenas_version:
+        type: string
+        required: true
+      memryx_sdk:
+        type: string
+        required: true
+      driver_ref:
+        type: string
+        required: true
+      driver_repo:
+        type: string
+        required: true
+      apt_channel:
+        type: string
+        required: true
+      train_name:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: false
+        default: ''
+      mark_latest:
+        type: string
+        required: false
+        default: 'false'
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash -euo pipefail {0}
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      truenas_version: ${{ steps.params.outputs.truenas_version }}
+      memryx_sdk: ${{ steps.params.outputs.memryx_sdk }}
+      driver_ref: ${{ steps.params.outputs.driver_ref }}
+      driver_repo: ${{ steps.params.outputs.driver_repo }}
+      apt_channel: ${{ steps.params.outputs.apt_channel }}
+      train_name: ${{ steps.params.outputs.train_name }}
+      runner: ${{ steps.params.outputs.runner }}
+      mark_latest: ${{ steps.params.outputs.mark_latest }}
+      prerelease: ${{ steps.params.outputs.prerelease }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github/tracked-versions.json
+            .github/scripts/resolve-runner.sh
+          sparse-checkout-cone-mode: false
+
+      - name: Resolve build parameters
+        id: params
+        env:
+          INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
+          INPUT_MEMRYX_SDK: ${{ inputs.memryx_sdk }}
+          INPUT_DRIVER_REF: ${{ inputs.driver_ref }}
+          INPUT_DRIVER_REPO: ${{ inputs.driver_repo }}
+          INPUT_APT_CHANNEL: ${{ inputs.apt_channel }}
+          INPUT_TRAIN_NAME: ${{ inputs.train_name }}
+          INPUT_RUNNER: ${{ inputs.runner }}
+          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
+        run: |
+          set -euo pipefail
+
+          TRACKED=$(python3 -c "
+          import json
+          with open('.github/tracked-versions.json') as f:
+              d = json.load(f)
+          print(d['truenas']['version'])
+          print(d['truenas']['train'])
+          print(d['memryx']['sdk'])
+          print(d['memryx']['driver_ref'])
+          print(d['memryx'].get('driver_repo', 'memryx/mx3_driver_pub'))
+          print(d['memryx'].get('apt_channel', 'stable'))
+          ")
+          TRACKED_VERSION=$(sed -n '1p' <<< "$TRACKED")
+          TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
+          TRACKED_SDK=$(sed -n '3p' <<< "$TRACKED")
+          TRACKED_REF=$(sed -n '4p' <<< "$TRACKED")
+          TRACKED_REPO=$(sed -n '5p' <<< "$TRACKED")
+          TRACKED_CHANNEL=$(sed -n '6p' <<< "$TRACKED")
+
+          VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_VERSION}"
+          TRAIN="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
+          SDK="${INPUT_MEMRYX_SDK:-$TRACKED_SDK}"
+          REF="${INPUT_DRIVER_REF:-$TRACKED_REF}"
+          REPO="${INPUT_DRIVER_REPO:-$TRACKED_REPO}"
+          CHANNEL="${INPUT_APT_CHANNEL:-$TRACKED_CHANNEL}"
+          RUNNER="${INPUT_RUNNER}"
+          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
+          # Unverified auto-builds (mark_latest=false) are published as a
+          # PRERELEASE so GitHub keeps them out of /releases/latest (and thus
+          # install.sh) until a human promotes them. make_latest=false alone
+          # does NOT hold this gate with action-gh-release@v3.
+          if [ "$MARK_LATEST" = "true" ]; then PRERELEASE="false"; else PRERELEASE="true"; fi
+
+          if [ -z "$RUNNER" ]; then
+            RUNNER=$(.github/scripts/resolve-runner.sh "$TRAIN" "$VERSION")
+          fi
+
+          {
+            echo "truenas_version=${VERSION}"
+            echo "memryx_sdk=${SDK}"
+            echo "driver_ref=${REF}"
+            echo "driver_repo=${REPO}"
+            echo "apt_channel=${CHANNEL}"
+            echo "train_name=${TRAIN}"
+            echo "runner=${RUNNER}"
+            echo "mark_latest=${MARK_LATEST}"
+            echo "prerelease=${PRERELEASE}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved build parameters:"
+          echo "  truenas_version=${VERSION}"
+          echo "  memryx_sdk=${SDK}"
+          echo "  driver_ref=${REF}"
+          echo "  driver_repo=${REPO}"
+          echo "  apt_channel=${CHANNEL}"
+          echo "  train_name=${TRAIN}"
+          echo "  runner=${RUNNER}"
+          echo "  mark_latest=${MARK_LATEST}"
+          echo "  prerelease=${PRERELEASE}"
+
+  build:
+    needs: resolve
+    runs-on: ${{ needs.resolve.outputs.runner }}
+    timeout-minutes: 90
+    outputs:
+      run_number: ${{ steps.build_id.outputs.run_number }}
+      memryx_pkg_version: ${{ steps.userspace.outputs.memryx_pkg_version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            libelf-dev \
+            squashfs-tools \
+            zstd \
+            kmod \
+            curl \
+            dpkg-dev
+
+      - name: Compute build identifier
+        id: build_id
+        # Burned into the release tag as -r<run> so every invocation gets a
+        # unique tag and nothing collides with GitHub's immutable-release
+        # tag-burn. github.run_number is monotonic per workflow, so it also
+        # covers the same-commit re-dispatch case (manual retry after a
+        # transient failure, fresh build after a deleted release) where a SHA
+        # alone wouldn't change. Short and human-readable. Exposed as a step
+        # output (not $GITHUB_ENV) so workflow expressions can reference it
+        # statically; run blocks that need the value as a shell var get it
+        # through the step's env: block.
+        run: |
+          echo "run_number=${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+
+      # -- Obtain TrueNAS kernel headers from the release ISO --
+      # (Identical to the sibling coral/hailo sysexts: the TrueNAS ISO layout
+      # and header-detection logic are device-independent.)
+      - name: Restore cached TrueNAS ISO
+        id: iso-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/truenas.iso
+          key: truenas-iso-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Download TrueNAS ISO
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        run: |
+          TRAIN="TrueNAS-SCALE-${{ needs.resolve.outputs.train_name }}"
+          VERSION="${{ needs.resolve.outputs.truenas_version }}"
+          ISO_URL="https://download.truenas.com/${TRAIN}/${VERSION}/TrueNAS-SCALE-${VERSION}.iso"
+          SHA_URL="${ISO_URL}.sha256"
+          echo "Downloading: ${ISO_URL}"
+          curl -fSL "$ISO_URL" -o /tmp/truenas.iso
+          ls -lh /tmp/truenas.iso
+
+          echo "Verifying ISO checksum..."
+          curl -fSL "$SHA_URL" -o /tmp/truenas.iso.sha256
+          EXPECTED=$(awk '{print $1}' /tmp/truenas.iso.sha256)
+          ACTUAL=$(sha256sum /tmp/truenas.iso | awk '{print $1}')
+          if [ "$EXPECTED" != "$ACTUAL" ]; then
+            echo "::error title=iso-checksum::SHA256 mismatch. Expected: ${EXPECTED}, got: ${ACTUAL}"
+            exit 1
+          fi
+          echo "ISO checksum verified: ${ACTUAL}"
+
+      - name: Save TrueNAS ISO to cache
+        if: steps.iso-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/truenas.iso
+          key: truenas-iso-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Restore cached kernel headers
+        id: headers-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: /tmp/kernel-headers
+          key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Extract kernel headers from TrueNAS ISO
+        if: steps.headers-cache.outputs.cache-hit != 'true'
+        run: |
+          # TrueNAS ISO structure:
+          #   /live/filesystem.squashfs  -- installer-only environment (NO kernel headers)
+          #   /TrueNAS-SCALE.update      -- outer squashfs containing:
+          #     /rootfs.squashfs           -- full rootfs with headers at /usr/src/linux-headers-*
+          #
+          # We must extract the nested rootfs.squashfs from inside the .update file.
+
+          sudo mkdir -p /tmp/iso
+          sudo mount -o loop /tmp/truenas.iso /tmp/iso
+
+          echo "=== ISO contents ==="
+          ls -la /tmp/iso/
+
+          # --- Extract the real rootfs from TrueNAS-SCALE.update (nested squashfs) ---
+          # TrueNAS 24/25 name the outer update squashfs "TrueNAS-SCALE.update";
+          # TrueNAS 26 (Halfmoon) renamed it to "TrueNAS.update". Accept either
+          # known name, then any *.update, before falling back to the installer's
+          # (header-less) live/filesystem.squashfs.
+          UPDATE_FILE=""
+          for cand in /tmp/iso/TrueNAS-SCALE.update /tmp/iso/TrueNAS.update /tmp/iso/*.update; do
+            if [ -f "$cand" ]; then UPDATE_FILE="$cand"; break; fi
+          done
+          if [ -n "$UPDATE_FILE" ]; then
+            echo "Found update squashfs: ${UPDATE_FILE} ($(du -h "$UPDATE_FILE" | cut -f1)), extracting rootfs.squashfs..."
+            sudo rm -rf /tmp/update-contents
+            sudo unsquashfs -d /tmp/update-contents "$UPDATE_FILE" rootfs.squashfs || {
+              echo "ERROR: Failed to extract rootfs.squashfs from .update file"
+              sudo umount /tmp/iso
+              exit 1
+            }
+
+            ROOTFS_SQUASHFS="/tmp/update-contents/rootfs.squashfs"
+            if [ ! -f "$ROOTFS_SQUASHFS" ]; then
+              echo "ERROR: rootfs.squashfs not found inside .update file"
+              echo "=== .update contents ==="
+              ls -la /tmp/update-contents/
+              sudo umount /tmp/iso
+              exit 1
+            fi
+
+            echo "Extracting kernel headers from rootfs.squashfs..."
+            sudo rm -rf /tmp/rootfs
+            # Extract only /usr/src and /lib/modules to save time and disk
+            sudo unsquashfs -d /tmp/rootfs "$ROOTFS_SQUASHFS" 'usr/src/linux-headers-*' 'lib/modules/*' || {
+              echo "WARNING: Selective extract failed, trying full extract..."
+              sudo rm -rf /tmp/rootfs
+              sudo unsquashfs -d /tmp/rootfs "$ROOTFS_SQUASHFS"
+            }
+          else
+            echo "No TrueNAS-SCALE.update found, falling back to live/filesystem.squashfs..."
+
+            # Fallback for older ISO layouts
+            SQUASHFS=""
+            for candidate in \
+              /tmp/iso/live/filesystem.squashfs \
+              /tmp/iso/rootfs.squashfs \
+              /tmp/iso/truenas.squashfs; do
+              if [ -f "$candidate" ]; then
+                SQUASHFS="$candidate"
+                break
+              fi
+            done
+
+            if [ -z "$SQUASHFS" ]; then
+              echo "ERROR: Could not find any squashfs in ISO"
+              find /tmp/iso -name "*.squashfs" -o -name "*.update" 2>/dev/null || true
+              sudo umount /tmp/iso
+              exit 1
+            fi
+
+            echo "Found squashfs: $SQUASHFS"
+            sudo mkdir -p /tmp/rootfs
+            sudo mount -o loop "$SQUASHFS" /tmp/rootfs
+          fi
+
+          # --- Find kernel headers ---
+          echo "=== /usr/src contents ==="
+          ls -la /tmp/rootfs/usr/src/ 2>/dev/null || echo "(empty or missing)"
+
+          # Select kernel headers: prefer production over debug.
+          # shellcheck disable=SC2010 # ls|grep is fine: TrueNAS rootfs filenames are package-controlled (no spaces/newlines)
+          KVER=$(ls /tmp/rootfs/usr/src/ 2>/dev/null | grep 'linux-headers-' | sed 's/linux-headers-//' | grep -i 'production' | head -1 || true)
+          if [ -z "$KVER" ]; then
+            # shellcheck disable=SC2010
+            KVER=$(ls /tmp/rootfs/usr/src/ 2>/dev/null | grep 'linux-headers-' | sed 's/linux-headers-//' | grep -vi 'debug' | head -1 || true)
+          fi
+
+          if [ -z "$KVER" ]; then
+            echo "::error title=kernel-headers::no production or non-debug headers found under /tmp/rootfs/usr/src/. The TrueNAS rootfs layout may have changed; investigate before relaxing the selector."
+            echo "=== Debug: /usr/src contents ==="
+            ls -la /tmp/rootfs/usr/src/ 2>/dev/null || true
+            echo "=== Debug: /lib/modules contents ==="
+            ls -la /tmp/rootfs/lib/modules/ 2>/dev/null || true
+            sudo umount /tmp/iso 2>/dev/null || true
+            exit 1
+          fi
+
+          echo "Header package version: ${KVER}"
+
+          # Detect the REAL kernel version (what uname -r returns on the target).
+          REAL_KVER=""
+          KREL_FILE="/tmp/rootfs/usr/src/linux-headers-${KVER}/include/config/kernel.release"
+          if [ -f "$KREL_FILE" ]; then
+            REAL_KVER=$(tr -d '[:space:]' < "$KREL_FILE")
+          fi
+          if [ -z "$REAL_KVER" ]; then
+            # shellcheck disable=SC2010
+            REAL_KVER=$(ls /tmp/rootfs/lib/modules/ 2>/dev/null | grep -v '^\.' | grep -i 'production' | head -1 || true)
+          fi
+          if [ -z "$REAL_KVER" ]; then
+            # shellcheck disable=SC2010
+            REAL_KVER=$(ls /tmp/rootfs/lib/modules/ 2>/dev/null | grep -v '^\.' | grep -vi 'debug' | head -1 || true)
+          fi
+          if [ -z "$REAL_KVER" ]; then
+            echo "::error title=kernel-version::could not resolve real kernel version. Method 1 (${KREL_FILE}) and Method 2 (/tmp/rootfs/lib/modules/) both returned empty. The TrueNAS rootfs layout may have changed; investigate before bumping the runner or KVER detection." >&2
+            exit 1
+          fi
+          echo "Real kernel version: ${REAL_KVER}"
+
+          # Copy kernel headers to build directory
+          sudo mkdir -p /tmp/kernel-headers
+          sudo cp -a "/tmp/rootfs/usr/src/linux-headers-${KVER}" /tmp/kernel-headers/
+
+          # Save real kernel version for later steps
+          echo "$REAL_KVER" | sudo tee /tmp/kernel-headers/.real-kver
+
+          sudo umount /tmp/rootfs 2>/dev/null || true
+          sudo rm -rf /tmp/rootfs /tmp/update-contents
+          sudo umount /tmp/iso 2>/dev/null || true
+
+          echo "Kernel headers extracted successfully"
+          ls -la /tmp/kernel-headers/
+
+      - name: Save kernel headers to cache
+        if: steps.headers-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v5
+        with:
+          path: /tmp/kernel-headers
+          key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}
+
+      - name: Detect kernel version from cached headers
+        run: |
+          # shellcheck disable=SC2010 # ls|grep is fine: TrueNAS package-controlled filenames
+          KVER=$(ls /tmp/kernel-headers/ | grep 'linux-headers-' | sed 's/linux-headers-//' | grep -i 'production' | head -1 || true)
+          if [ -z "$KVER" ]; then
+            # shellcheck disable=SC2010
+            KVER=$(ls /tmp/kernel-headers/ | grep 'linux-headers-' | sed 's/linux-headers-//' | grep -vi 'debug' | head -1 || true)
+          fi
+          if [ -z "$KVER" ]; then
+            echo "::error title=kernel-headers::no production or non-debug headers found in cache /tmp/kernel-headers/. Cache may have been populated from a rootfs with a changed layout; bust the kernel-headers cache and re-run."
+            ls -la /tmp/kernel-headers/
+            exit 1
+          fi
+          echo "Header package version: ${KVER}"
+          echo "KVER=${KVER}" >> "$GITHUB_ENV"
+
+          REAL_KVER=""
+          if [ -f "/tmp/kernel-headers/.real-kver" ]; then
+            REAL_KVER=$(tr -d '[:space:]' < /tmp/kernel-headers/.real-kver)
+          fi
+          if [ -z "$REAL_KVER" ]; then
+            echo "::error title=kernel-version::.real-kver missing or empty in cached kernel headers. Bust the kernel-headers cache (key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}) and re-run."
+            exit 1
+          fi
+          echo "Real kernel version: ${REAL_KVER}"
+          echo "REAL_KVER=${REAL_KVER}" >> "$GITHUB_ENV"
+
+          # Detect the GCC major version the kernel was compiled with.
+          HEADER_DIR="/tmp/kernel-headers/linux-headers-${KVER}"
+          GCC_VER=""
+          extract_gcc_ver() {
+            local file="$1"
+            local ver
+            ver=$(grep -oP 'gcc-\K[0-9]+' "$file" 2>/dev/null | head -1)
+            if [ -n "$ver" ]; then printf '%s' "$ver"; return; fi
+            ver=$(grep -oP 'gcc\s+\(.*?\)\s+\K[0-9]+' "$file" 2>/dev/null | head -1)
+            if [ -n "$ver" ]; then printf '%s' "$ver"; return; fi
+          }
+          if [ -f "${HEADER_DIR}/include/config/cc-version-text" ]; then
+            GCC_VER=$(extract_gcc_ver "${HEADER_DIR}/include/config/cc-version-text")
+          fi
+          if [ -z "$GCC_VER" ] && [ -f "${HEADER_DIR}/include/generated/compile.h" ]; then
+            GCC_VER=$(extract_gcc_ver "${HEADER_DIR}/include/generated/compile.h")
+          fi
+          if [ -z "$GCC_VER" ]; then
+            echo "::warning title=gcc-version::could not detect GCC version from kernel headers, defaulting to gcc-12"
+            GCC_VER="12"
+          fi
+          echo "Kernel GCC version: gcc-${GCC_VER}"
+          echo "KERNEL_GCC=gcc-${GCC_VER}" >> "$GITHUB_ENV"
+
+      # -- Build the MX3 PCIe kernel module from the GPLv2 source mirror --
+      - name: Clone mx3_driver_pub
+        run: |
+          DRIVER_REPO="${{ needs.resolve.outputs.driver_repo }}"
+          DRIVER_REF="${{ needs.resolve.outputs.driver_ref }}"
+          echo "Cloning from: ${DRIVER_REPO} at ${DRIVER_REF}"
+          git clone "https://github.com/${DRIVER_REPO}.git" /tmp/mx3-driver
+          cd /tmp/mx3-driver
+          git checkout "${DRIVER_REF}"
+          echo "Checked out mx3_driver_pub:"
+          git log --oneline -1
+
+      - name: Install kernel-matching GCC
+        run: |
+          if ! command -v "$KERNEL_GCC" &>/dev/null; then
+            sudo apt-get install -y "$KERNEL_GCC"
+          fi
+          echo "Using compiler: $("$KERNEL_GCC" --version | head -1)"
+
+      - name: Build memx_cascade_plus_pcie kernel module
+        run: |
+          # Build the out-of-tree PCIe module directly against the extracted
+          # TrueNAS headers, matching the kernel's compiler. The repo Makefile's
+          # default target hardcodes /lib/modules/$(uname -r)/build and also
+          # builds a userspace test `app`; we invoke kbuild directly so it
+          # targets the TrueNAS kernel, not the runner's. INCLUDES mirrors the
+          # Makefile (-I<repo>/kdriver/include).
+          PCIE_DIR="/tmp/mx3-driver/kdriver/linux/pcie"
+          KERNEL_DIR="/tmp/kernel-headers/linux-headers-${KVER}"
+          INCLUDES="-I/tmp/mx3-driver/kdriver/include"
+          echo "Building memx_cascade_plus_pcie.ko against kernel ${KVER} with ${KERNEL_GCC}..."
+          make -C "$KERNEL_DIR" M="$PCIE_DIR" EXTRA_CFLAGS="$INCLUDES" CC="$KERNEL_GCC" modules
+          echo "=== Module info ==="
+          modinfo "${PCIE_DIR}/memx_cascade_plus_pcie.ko"
+          ls -lh "${PCIE_DIR}/memx_cascade_plus_pcie.ko"
+
+      # -- Fetch the redistributable userspace stack from MemryX's apt repo --
+      # libmemx.so (the userspace C API) is NOT in the public source mirror;
+      # memx-accl / mxa-manager build-depend on the memx-drivers package for it.
+      # All three packages are redistributable (kdriver GPLv2, MxAccl MPL-2.0,
+      # firmware "redistribute exact copies"), so we pull the official prebuilt
+      # debs pinned at the Frigate-validated SDK and unpack the userspace files
+      # we need. The debs are kernel-independent (the .ko we built above is the
+      # only kernel-coupled artifact); the DKMS module *source* in the deb is
+      # ignored.
+      - name: Stage MemryX userspace from apt packages
+        id: userspace
+        env:
+          MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
+          APT_CHANNEL: ${{ needs.resolve.outputs.apt_channel }}
+        run: |
+          set -euo pipefail
+          curl -fsSL https://developer.memryx.com/deb/memryx.asc \
+            | sudo tee /etc/apt/trusted.gpg.d/memryx.asc >/dev/null
+          echo "deb https://developer.memryx.com/deb ${APT_CHANNEL} main" \
+            | sudo tee /etc/apt/sources.list.d/memryx.list >/dev/null
+          sudo apt-get update
+
+          # Resolve the concrete patch version within the SDK major.minor for
+          # each package (apt-get download wants an exact pkg=version, not a
+          # wildcard). Frigate pins `=2.1.*`; we mirror that and take the
+          # highest 2.1.x the pool currently serves.
+          SDK_ESC=$(printf '%s' "$MEMRYX_SDK" | sed 's/\./\\./g')
+          resolve_ver() {
+            local pkg="$1"
+            apt-cache madison "$pkg" 2>/dev/null \
+              | awk '{print $3}' \
+              | grep -E "^${SDK_ESC}\." \
+              | sort -V | tail -1 || true
+          }
+
+          mkdir -p /tmp/memryx-debs
+          cd /tmp/memryx-debs
+          RESOLVED=""
+          for pkg in memx-drivers memx-accl mxa-manager; do
+            VER=$(resolve_ver "$pkg")
+            if [ -z "$VER" ]; then
+              echo "::error title=memryx-apt::no ${pkg} version matching ${MEMRYX_SDK}.* in channel ${APT_CHANNEL}. The Frigate-pinned SDK may have been dropped from the pool, or the channel changed."
+              echo "Available ${pkg} versions:" >&2
+              apt-cache madison "$pkg" 2>/dev/null | awk '{print "  "$3}' >&2 || true
+              exit 1
+            fi
+            echo "Resolved ${pkg} = ${VER}"
+            apt-get download "${pkg}=${VER}"
+            RESOLVED="${RESOLVED}${RESOLVED:+, }${pkg} ${VER}"
+          done
+          # Record the memx-drivers patch version as the canonical "package
+          # version" for release notes / smoke labelling.
+          DRIVERS_VER=$(resolve_ver memx-drivers)
+          echo "memryx_pkg_version=${DRIVERS_VER}" >> "$GITHUB_OUTPUT"
+          echo "Resolved packages: ${RESOLVED}"
+
+          # Unpack all three into a single staging tree.
+          rm -rf /tmp/memryx-userspace
+          mkdir -p /tmp/memryx-userspace
+          for d in /tmp/memryx-debs/*.deb; do
+            echo "Unpacking ${d}"
+            dpkg-deb -x "$d" /tmp/memryx-userspace
+          done
+
+          echo "=== staged userspace tree (usr/bin, usr/lib shared objects) ==="
+          find /tmp/memryx-userspace/usr/bin -maxdepth 1 -type f 2>/dev/null | sort || true
+          find /tmp/memryx-userspace -name '*.so*' 2>/dev/null | sort || true
+
+      # -- Assemble sysext --
+      - name: Assemble sysext filesystem tree
+        run: |
+          SYSEXT_ROOT="/tmp/memryx-sysext"
+          STAGE="/tmp/memryx-userspace"
+          mkdir -p "${SYSEXT_ROOT}"
+
+          # extension-release
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/extension-release.d"
+          echo "ID=_any" > "${SYSEXT_ROOT}/usr/lib/extension-release.d/extension-release.memryx"
+
+          # Kernel module (built above). Use REAL_KVER (e.g.
+          # 6.12.33-production+truenas), not KVER (header dir name).
+          MOD_DIR="${SYSEXT_ROOT}/usr/lib/modules/${REAL_KVER}/extra"
+          mkdir -p "$MOD_DIR"
+          cp /tmp/mx3-driver/kdriver/linux/pcie/memx_cascade_plus_pcie.ko "$MOD_DIR/"
+
+          # --- Userspace shared libraries (libmemx + mx_accl runtime) ---
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/x86_64-linux-gnu"
+          SO_COUNT=0
+          while IFS= read -r so; do
+            [ -n "$so" ] || continue
+            cp -a "$so" "${SYSEXT_ROOT}/usr/lib/x86_64-linux-gnu/"
+            SO_COUNT=$((SO_COUNT+1))
+          done < <(find "$STAGE" -type f -name 'libmemx*.so*' -o -type f -name 'libmx*.so*' 2>/dev/null)
+          # Preserve any soname symlinks that shipped in the deb.
+          while IFS= read -r sl; do
+            [ -n "$sl" ] || continue
+            cp -a "$sl" "${SYSEXT_ROOT}/usr/lib/x86_64-linux-gnu/" 2>/dev/null || true
+          done < <(find "$STAGE" -type l \( -name 'libmemx*.so*' -o -name 'libmx*.so*' \) 2>/dev/null)
+          if [ "$SO_COUNT" -eq 0 ]; then
+            echo "::error title=userspace::no libmemx*/libmx* shared objects found in the MemryX debs. The package layout may have changed; inspect /tmp/memryx-userspace."
+            find "$STAGE" -name '*.so*' 2>/dev/null | sort || true
+            exit 1
+          fi
+
+          # --- mxa-manager daemon binary ---
+          mkdir -p "${SYSEXT_ROOT}/usr/bin"
+          if [ -f "${STAGE}/usr/bin/mxa_manager" ]; then
+            cp "${STAGE}/usr/bin/mxa_manager" "${SYSEXT_ROOT}/usr/bin/mxa_manager"
+            chmod +x "${SYSEXT_ROOT}/usr/bin/mxa_manager"
+          else
+            echo "::error title=userspace::mxa_manager binary not found at usr/bin/mxa_manager in the unpacked debs."
+            find "$STAGE/usr/bin" -maxdepth 1 -type f 2>/dev/null | sort || true
+            exit 1
+          fi
+
+          # --- MemryX CLI/helper binaries (best-effort: benchmark, flash tool) ---
+          # Names vary across SDK releases; ship the common ones if present so
+          # operators can verify on-host without the full SDK. Not required.
+          for bin in acclBench mx_bench memx_flash mx_flash flash_update_tool; do
+            if [ -f "${STAGE}/usr/bin/${bin}" ]; then
+              cp "${STAGE}/usr/bin/${bin}" "${SYSEXT_ROOT}/usr/bin/${bin}"
+              chmod +x "${SYSEXT_ROOT}/usr/bin/${bin}"
+            fi
+          done
+
+          # --- Firmware blobs (from the GPL-mirror repo; license explicitly
+          # permits redistributing exact copies). The driver's request_firmware
+          # path looks for cascade.bin under /lib/firmware; merged-usr maps
+          # /usr/lib/firmware -> /lib/firmware. We ship all variants so the
+          # optional on-host flash step can pick the right one. ---
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/firmware"
+          if compgen -G "/tmp/mx3-driver/firmware/*.bin" > /dev/null; then
+            cp /tmp/mx3-driver/firmware/*.bin "${SYSEXT_ROOT}/usr/lib/firmware/"
+          else
+            echo "::error title=firmware::no firmware blobs found under /tmp/mx3-driver/firmware/"
+            exit 1
+          fi
+
+          # --- systemd units: oneshot module load + persistent mxa-manager ---
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/systemd/system/multi-user.target.wants"
+          cp sysext/usr/lib/systemd/system/memryx-load.service "${SYSEXT_ROOT}/usr/lib/systemd/system/"
+          cp sysext/usr/lib/systemd/system/mxa-manager.service "${SYSEXT_ROOT}/usr/lib/systemd/system/"
+          ln -sf ../memryx-load.service "${SYSEXT_ROOT}/usr/lib/systemd/system/multi-user.target.wants/memryx-load.service"
+          ln -sf ../mxa-manager.service "${SYSEXT_ROOT}/usr/lib/systemd/system/multi-user.target.wants/mxa-manager.service"
+
+          # --- udev rules ---
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/udev/rules.d"
+          cp sysext/usr/lib/udev/rules.d/51-memryx-udev.rules "${SYSEXT_ROOT}/usr/lib/udev/rules.d/"
+
+          # --- preinit script (bundled for install.sh to extract) ---
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/memryx"
+          cp scripts/memryx-preinit.sh "${SYSEXT_ROOT}/usr/lib/memryx/memryx-preinit.sh"
+          chmod +x "${SYSEXT_ROOT}/usr/lib/memryx/memryx-preinit.sh"
+
+          # NOTE: No depmod (would overwrite the base system's modules.dep via
+          # overlayfs). memryx-load.service insmods the .ko directly.
+          # NOTE: ldconfig is run by install.sh / the PREINIT script after the
+          # sysext is merged, so the new libmemx*/libmx* sonames are resolvable.
+
+          echo "=== Sysext tree ==="
+          find "${SYSEXT_ROOT}" -type f -o -type l | sort
+
+      - name: Create memryx.raw squashfs
+        run: |
+          # -all-root: the runner builds the tree as a non-root user, but the
+          # sysext is exec'd as root on the target. Own files as root rather
+          # than carrying the runner's uid/gid into the squashfs.
+          mksquashfs /tmp/memryx-sysext memryx.raw -noappend -comp zstd -all-root
+          echo "=== memryx.raw ==="
+          ls -lh memryx.raw
+          echo ""
+          echo "=== Contents ==="
+          unsquashfs -l memryx.raw | head -60
+
+      - name: Smoke-test memryx.raw contents
+        run: |
+          # Open the produced squashfs and verify every component the release
+          # advertises is present at the right path. Catches silent mksquashfs
+          # flag drift, kernel-path drift, missing preinit bundling, a MemryX
+          # deb-layout change that dropped a binary, etc.
+          set -e
+          SMOKE_TMP="$(mktemp -d)"
+          trap 'rm -rf "$SMOKE_TMP"' EXIT
+
+          unsquashfs -d "${SMOKE_TMP}/extract" memryx.raw
+
+          fail=0
+          require_file() {
+            local rel="$1"; local path="${SMOKE_TMP}/extract/${rel}"
+            if [ ! -e "$path" ]; then
+              echo "::error title=smoke-test::missing in memryx.raw: ${rel}"; fail=1; return
+            fi
+            echo "  ok: ${rel}"
+          }
+          require_elf() {
+            local rel="$1"; local path="${SMOKE_TMP}/extract/${rel}"
+            if [ ! -f "$path" ]; then
+              echo "::error title=smoke-test::missing in memryx.raw: ${rel}"; fail=1; return
+            fi
+            if ! file "$path" | grep -q 'ELF'; then
+              echo "::error title=smoke-test::not an ELF binary: ${rel}"; file "$path"; fail=1; return
+            fi
+            echo "  ok (ELF): ${rel}"
+          }
+
+          echo "=== smoke-test: required paths ==="
+          require_file "usr/lib/extension-release.d/extension-release.memryx"
+          EXT_REL="${SMOKE_TMP}/extract/usr/lib/extension-release.d/extension-release.memryx"
+          if [ -f "$EXT_REL" ] && ! grep -qx 'ID=_any' "$EXT_REL"; then
+            echo "::error title=smoke-test::extension-release.memryx does not contain 'ID=_any'; got: $(cat "$EXT_REL")"; fail=1
+          fi
+          require_file "usr/lib/modules/${REAL_KVER}/extra/memx_cascade_plus_pcie.ko"
+          require_elf  "usr/bin/mxa_manager"
+          require_file "usr/lib/systemd/system/memryx-load.service"
+          require_file "usr/lib/systemd/system/mxa-manager.service"
+          require_file "usr/lib/udev/rules.d/51-memryx-udev.rules"
+          require_file "usr/lib/memryx/memryx-preinit.sh"
+
+          # At least one libmemx*/libmx* ELF shared object.
+          LIBMX_REL=$(cd "${SMOKE_TMP}/extract" && \
+            find usr/lib/x86_64-linux-gnu -maxdepth 1 \( -name 'libmemx*.so*' -o -name 'libmx*.so*' \) -not -type l 2>/dev/null | head -1) || true
+          if [ -z "$LIBMX_REL" ]; then
+            echo "::error title=smoke-test::no concrete libmemx*/libmx* shared object found in memryx.raw"; fail=1
+          else
+            require_elf "$LIBMX_REL"
+          fi
+
+          # At least one firmware blob.
+          FW_REL=$(cd "${SMOKE_TMP}/extract" && find usr/lib/firmware -maxdepth 1 -name '*.bin' 2>/dev/null | head -1) || true
+          if [ -z "$FW_REL" ]; then
+            echo "::error title=smoke-test::no firmware *.bin found in memryx.raw"; fail=1
+          else
+            require_file "$FW_REL"
+          fi
+
+          # vermagic sanity: the module's vermagic must reference REAL_KVER.
+          KO_PATH="${SMOKE_TMP}/extract/usr/lib/modules/${REAL_KVER}/extra/memx_cascade_plus_pcie.ko"
+          if [ -f "$KO_PATH" ]; then
+            VERMAGIC=$(modinfo -F vermagic "$KO_PATH" 2>/dev/null || true)
+            if [ -z "$VERMAGIC" ]; then
+              echo "::error title=smoke-test::could not read vermagic from memx_cascade_plus_pcie.ko"; fail=1
+            elif ! printf '%s' "$VERMAGIC" | grep -qF "$REAL_KVER"; then
+              echo "::error title=smoke-test::memx_cascade_plus_pcie.ko vermagic does not reference REAL_KVER (${REAL_KVER}); got: ${VERMAGIC}"; fail=1
+            else
+              echo "  ok: memx_cascade_plus_pcie.ko vermagic references ${REAL_KVER}"
+            fi
+          fi
+
+          if [ "$fail" -ne 0 ]; then
+            echo "::error title=smoke-test::memryx.raw is missing required components, refusing to publish"
+            exit 1
+          fi
+          echo "smoke-test OK"
+
+      - name: Generate checksums
+        run: |
+          sha256sum memryx.raw > memryx.raw.sha256
+          cat memryx.raw.sha256
+
+      - name: Render release notes
+        env:
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          TRAIN_NAME: ${{ needs.resolve.outputs.train_name }}
+          MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
+          MEMRYX_PKG_VERSION: ${{ steps.userspace.outputs.memryx_pkg_version }}
+          DRIVER_REF: ${{ needs.resolve.outputs.driver_ref }}
+          DRIVER_REPO: ${{ needs.resolve.outputs.driver_repo }}
+          APT_CHANNEL: ${{ needs.resolve.outputs.apt_channel }}
+          RUNNER_IMAGE: ${{ needs.resolve.outputs.runner }}
+          BUILD_SHA: ${{ github.sha }}
+          RUN_NUMBER: ${{ steps.build_id.outputs.run_number }}
+          REPO: ${{ github.repository }}
+        run: |
+          envsubst '${TRUENAS_VERSION} ${TRAIN_NAME} ${MEMRYX_SDK} ${MEMRYX_PKG_VERSION} ${DRIVER_REF} ${DRIVER_REPO} ${APT_CHANNEL} ${REAL_KVER} ${RUNNER_IMAGE} ${BUILD_SHA} ${REPO} ${RUN_NUMBER}' > release-notes.md <<'RELEASE_NOTES'
+          ## MemryX MX3 Sysext for TrueNAS SCALE ${TRUENAS_VERSION} (${TRAIN_NAME})
+
+          | Field | Value |
+          | --- | --- |
+          | MemryX SDK | `${MEMRYX_SDK}` (packages `${MEMRYX_PKG_VERSION}`, apt channel `${APT_CHANNEL}`) |
+          | Driver source | [`${DRIVER_REF}`](https://github.com/${DRIVER_REPO}/tree/${DRIVER_REF}) |
+          | Target kernel | `${REAL_KVER}` |
+          | Built on | `${RUNNER_IMAGE}` |
+          | Source commit | [`${BUILD_SHA}`](https://github.com/${REPO}/commit/${BUILD_SHA}) |
+          | Frigate compatibility | [docker/memryx/user_installation.sh (dev)](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh) — pinned SDK: `${MEMRYX_SDK}` |
+
+          **Target Device:** MemryX MX3 M.2 AI accelerator (PCIe). Frigate's `memryx`
+          detector connects to the host `mxa-manager` daemon over `/run/mxa_manager`
+          and to `/dev/memx0`.
+
+          ### Included Components
+          - `memx_cascade_plus_pcie.ko` — MX3 PCIe kernel module (built against kernel `${REAL_KVER}`)
+          - `libmemx*` / `libmx*` — MemryX userspace C API + C++ runtime (`mx_accl`)
+          - `mxa_manager` — device management daemon (runs as a host service)
+          - `memryx-load.service` — loads the module on boot
+          - `mxa-manager.service` — runs the daemon, exposes `/run/mxa_manager`
+          - `memryx-preinit.sh` — TrueNAS PREINIT script bundled inside the sysext
+          - `51-memryx-udev.rules` — udev rules for `/dev/memx*` permissions
+          - `cascade*.bin` — MX3 firmware (redistributable exact copies)
+
+          ### Install
+          ```bash
+          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash
+          ```
+
+          ### Verify
+          ```bash
+          sudo ./install.sh --check
+          ls /dev/memx0 && systemctl status mxa-manager
+          ```
+
+          ### Uninstall
+          ```bash
+          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/uninstall.sh | sudo bash
+          ```
+
+          ### Checksums
+          See `memryx.raw.sha256`.
+
+          ### Source / Licensing
+          Kernel module built from [${DRIVER_REPO}](https://github.com/${DRIVER_REPO}) at `${DRIVER_REF}` (GPLv2).
+          Userspace (`libmemx`, `mx_accl`, `mxa_manager`) from MemryX's redistributable
+          `developer.memryx.com/deb` packages (MPL-2.0 / GPLv2). Firmware blobs are
+          redistributable exact copies per MemryX's firmware license.
+          RELEASE_NOTES
+
+          echo "=== Rendered release notes ==="
+          cat release-notes.md
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: memryx-sysext-${{ needs.resolve.outputs.truenas_version }}-sdk-${{ needs.resolve.outputs.memryx_sdk }}
+          path: |
+            memryx.raw
+            memryx.raw.sha256
+            release-notes.md
+
+  release:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: memryx-sysext-${{ needs.resolve.outputs.truenas_version }}-sdk-${{ needs.resolve.outputs.memryx_sdk }}
+
+      - name: Create GitHub release
+        id: release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.resolve.outputs.truenas_version }}-memryx${{ needs.resolve.outputs.memryx_sdk }}-r${{ needs.build.outputs.run_number }}
+          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - MemryX SDK ${{ needs.resolve.outputs.memryx_sdk }} (r${{ needs.build.outputs.run_number }})"
+          body_path: release-notes.md
+          files: |
+            memryx.raw
+            memryx.raw.sha256
+            scripts/memryx-lib.sh
+            scripts/install.sh
+            scripts/restore.sh
+            scripts/uninstall.sh
+          # Draft first so assets attach even on immutable-release repos.
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the draft (prerelease gate, or Latest on override)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          REL_ID: ${{ steps.release.outputs.id }}
+          MARK_LATEST: ${{ needs.resolve.outputs.mark_latest }}
+        run: |
+          if [ "$MARK_LATEST" = "true" ]; then
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -f make_latest=true
+          else
+            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
+          fi
+
+      - name: Create hardware-test issue for auto-build
+        if: needs.resolve.outputs.mark_latest == 'false'
+        uses: actions/github-script@v9
+        env:
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
+          RUN_NUMBER: ${{ needs.build.outputs.run_number }}
+        with:
+          script: |
+            const tag = `v${process.env.TRUENAS_VERSION}-memryx${process.env.MEMRYX_SDK}-r${process.env.RUN_NUMBER}`;
+            const title = `Hardware test: TrueNAS ${process.env.TRUENAS_VERSION} / MemryX SDK ${process.env.MEMRYX_SDK} (${tag})`;
+            const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+
+            // Ensure the label exists (idempotent, no-ops if already present).
+            try {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'hardware-test',
+                color: 'FBCA04',
+                description: 'Auto-build awaiting hardware verification',
+              });
+              console.log('Created hardware-test label');
+            } catch (e) {
+              if (e.status === 422) {
+                console.log('hardware-test label already exists');
+              } else {
+                throw e;
+              }
+            }
+
+            // Skip if an open issue already exists for this release tag.
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'hardware-test',
+              per_page: 100,
+            });
+            if (existing.data.some(i => i.title.includes(tag))) {
+              console.log(`Open hardware-test issue already exists for ${tag}, skipping`);
+              return;
+            }
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              labels: ['hardware-test'],
+              body: [
+                `An auto-build published a new release that needs hardware verification before being promoted to **Latest**.`,
+                ``,
+                `**Release:** [${tag}](${releaseUrl})`,
+                `<!-- release-tag: ${tag} -->`,
+                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
+                `**MemryX SDK:** ${process.env.MEMRYX_SDK}`,
+                ``,
+                `### Install THIS build to test it`,
+                `It is a **pre-release**, so the default \`latest\` install (and version auto-resolve) skip it. Install this exact build:`,
+                "```bash",
+                `BASE=https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`,
+                `curl -fsSL "$BASE/memryx.raw" -o /tmp/memryx.raw`,
+                `curl -fsSL "$BASE/install.sh" | sudo bash -s -- /tmp/memryx.raw`,
+                "```",
+                ``,
+                `### Test checklist`,
+                `- [ ] Download and install on a TrueNAS system with a MemryX MX3 M.2 card`,
+                `- [ ] Confirm \`/dev/memx0\` exists after module load`,
+                `- [ ] Confirm \`systemctl status mxa-manager\` is active and \`/run/mxa_manager\` exists`,
+                `- [ ] Confirm Frigate's \`memryx\` detector initialises (SDK ${process.env.MEMRYX_SDK})`,
+                `- [ ] Reboot and confirm the PREINIT script restores the sysext + daemon`,
+                ``,
+                `### Promote`,
+                `This build is published as a **pre-release**, so it is not served by \`releases/latest\` (or install.sh) yet.`,
+                `Once you've verified it on hardware, **close this issue as completed** — that automatically promotes [\`${tag}\`](${releaseUrl}) to the latest release and appends the changelog.`,
+              ].join('\n'),
+            });
+            console.log(`Created hardware-test issue for ${tag}`);

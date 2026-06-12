@@ -865,6 +865,59 @@ echo "  memryx-preinit.sh         - runs before apps start (registered as PREINI
 echo ""
 echo "The MemryX MX3 driver + mxa-manager daemon will survive TrueNAS updates and reboots."
 
+# ==========================================================================
+# Final verification: did the stack actually come up?
+# ==========================================================================
+# A silently-failed daemon (missing config, device init, etc.) is the failure
+# mode that's most expensive to discover later — apps just can't reach the MX3.
+# `systemctl restart` returning 0 only means the start was accepted; a
+# Type=simple daemon can crash a moment later (and Restart=on-failure will then
+# cycle it). So settle briefly, then check is-active + the socket dir and
+# report clearly. NOT an EXIT trap: this must run only on the successful path,
+# not after the many `exit 1` error branches above.
+if [ "$DRY_RUN" != "1" ]; then
+    echo ""
+    echo "=== Verifying the MX3 stack ==="
+    # Wait for the daemon to settle (its ExecStartPre waits for /dev/memx0,
+    # then it binds the socket). Poll up to ~10s.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        systemctl is-active --quiet mxa-manager 2>/dev/null && [ -d /run/mxa_manager ] && break
+        sleep 1
+    done
+
+    verify_fail=0
+    if [ -e /dev/memx0 ]; then
+        echo "  ✓ device /dev/memx0 present"
+    else
+        echo "  ⚠ device /dev/memx0 not present — reboot, or confirm the card is seated / passed through"
+    fi
+    if systemctl is-active --quiet mxa-manager 2>/dev/null; then
+        echo "  ✓ mxa-manager daemon active"
+    else
+        echo "  ✗ mxa-manager daemon NOT active"
+        echo "      diagnose: systemctl status mxa-manager ; journalctl -u mxa-manager -b --no-pager | tail"
+        verify_fail=1
+    fi
+    if [ -d /run/mxa_manager ]; then
+        echo "  ✓ /run/mxa_manager socket dir present (mount this into your Frigate container)"
+    else
+        echo "  ✗ /run/mxa_manager missing (the daemon creates it on start)"
+        verify_fail=1
+    fi
+
+    if [ "$verify_fail" -eq 0 ]; then
+        echo ""
+        echo "Stack is up. For Frigate: run it PRIVILEGED with device /dev/memx0,"
+        echo "volume /run/mxa_manager, and detector 'device: PCIe:0'. If a detector"
+        echo "later reports 'accelerator has <garbage> chips', the card firmware is"
+        echo "too old — run: sudo ./install.sh --update-firmware  (bare metal only)."
+    else
+        echo ""
+        echo "WARNING: the MX3 stack did not fully come up (see the ✗ lines above)."
+        echo "  It will retry on boot. Re-run 'sudo ./install.sh --check' for a full probe."
+    fi
+fi
+
 if [ "$DRY_RUN" = "1" ]; then
     echo ""
     echo "=== Dry-run complete ==="

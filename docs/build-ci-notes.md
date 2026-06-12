@@ -124,14 +124,31 @@ a broken sysext.
    read by `dfp_executor.cpp` is guarded by an `exists()` check, so its absence is
    harmless.)
 
-**Still to verify on hardware:**
+4. **Firmware anti-rollback — resolved (r4), confirmed on hardware.** The SDK 2.1
+   runtime requires firmware **anti-rollback cnt ≥ 6**; cards with an older
+   counter fail with `accelerator has <garbage> chips` (e.g. `301989888`). The
+   firmware in the `driver_ref` (`v2.1.0`) tag is the OLD cnt-5 image, so we now
+   source firmware from a separate **`firmware_ref`** (`v2.2.0`, the cnt ≥ 6
+   image) — kept independent of the SDK-matched `driver_ref` (the kernel module
+   still builds from `driver_ref`). r4 also bundles the prebuilt GPLv2+ flash
+   tools (`pcieupdateflash` etc.) under `/usr/lib/memryx/flash/` and adds
+   `install.sh --update-firmware`. **Flashing only works on bare metal** —
+   `--update-firmware` calls `systemd-detect-virt` and refuses inside a VM,
+   because VFIO passthrough silently swallows the QSPI write (confirmed on a
+   Proxmox host: the in-guest flash reported OK but `verinfo` never changed;
+   flashing from the bare-metal host worked). A full power-cycle is required to
+   load new firmware.
 
-4. **Firmware path / flashing.** The M.2 is a QSPI-flash-boot board, so the
-   kernel only `request_firmware()`s `cascade.bin` for host-load boards. We bundle
-   all `cascade*.bin` to `/usr/lib/firmware`. On-board QSPI re-flashing (via the
-   GPL flash tool) is **not** done automatically — it's a hardware write. If a
-   driver/firmware version mismatch shows up, expose an explicit
-   `install.sh --update-firmware` step.
+## Hardware-confirmed requirements (the full working recipe)
+
+End-to-end validated on bare-metal-flashed hardware + TrueNAS-in-Proxmox:
+1. Kernel module + `mxa-manager` daemon (with `/etc/memryx/mxa_manager.conf`
+   materialized by the unit — r3).
+2. Firmware anti-rollback ≥ 6, flashed on **bare metal** + full power-cycle (r4).
+3. Frigate as a **privileged** Custom App (`privileged: true`; `cap_add:
+   SYS_RAWIO` confirmed **insufficient** — the detector `mmap`s the BAR memory)
+   with `device: PCIe:0`, `/dev/memx0`, and the `/run/mxa_manager` socket.
+   The TrueNAS catalog app can't be privileged.
 
 ## Lint
 

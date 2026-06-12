@@ -71,6 +71,21 @@ do_check() {
             "mxa-manager creates it on start; check the daemon status"
     fi
 
+    # 2c. Firmware (informational). The anti-rollback counter isn't exposed in
+    # verinfo, so we can't assert >= 6 here — but if the device is present we
+    # surface its firmware commit and point at the fix for the tell-tale
+    # "accelerator has <garbage> chips" failure (firmware too old).
+    if [ -r /sys/memx0/verinfo ]; then
+        local fw_commit
+        fw_commit=$(grep -oE 'FW_CommitID=0x[0-9a-fA-F]+' /sys/memx0/verinfo 2>/dev/null | head -1)
+        record_pass "Device firmware present (${fw_commit:-version unknown})"
+        if systemd-detect-virt -q --vm 2>/dev/null; then
+            hint_lines+=("    → firmware (anti-rollback cnt >= 6) must be flashed on the BARE-METAL host, not this VM")
+        else
+            hint_lines+=("    → if a detector reports 'accelerator has <garbage> chips', run: sudo ./install.sh --update-firmware")
+        fi
+    fi
+
     # 3. Activation symlink present and resolves to an image. It lives on tmpfs
     # (/run/extensions), so the PREINIT script recreates it on every boot; a
     # missing symlink is a warning, not a hard failure.
@@ -191,6 +206,74 @@ do_check() {
     return 0
 }
 
+# do_update_firmware: flash the bundled cnt>=6 MX3 firmware to the card's QSPI.
+# BARE METAL ONLY — VFIO passthrough silently swallows the QSPI writes, so we
+# refuse inside a VM and print the host-side procedure. Requires the sysext to
+# be installed+merged (the flash tool + firmware live in it). A full power-cycle
+# is needed afterward; the card only reads firmware from QSPI at power-on.
+do_update_firmware() {
+    local fw="/usr/lib/firmware/cascade_4chips_flash.bin"
+    local flash="/usr/lib/memryx/flash/pcieupdateflash"
+
+    # 1. VM guard — flashing from a passthrough guest does not work.
+    if command -v systemd-detect-virt >/dev/null 2>&1 && systemd-detect-virt -q --vm; then
+        local virt; virt=$(systemd-detect-virt 2>/dev/null || echo "vm")
+        echo "ERROR: this TrueNAS is a VM (${virt}). MX3 firmware CANNOT be flashed from a" >&2
+        echo "  passthrough guest — VFIO silently drops the QSPI writes. Flash on the" >&2
+        echo "  bare-metal hypervisor host instead:" >&2
+        echo "    1. shut down this VM" >&2
+        echo "    2. on the host:  echo <BDF> > /sys/bus/pci/drivers/vfio-pci/unbind   # BDF from: lspci -d 1fe9:" >&2
+        echo "    3. git clone https://github.com/memryx/mx3_driver_pub && cd mx3_driver_pub" >&2
+        echo "       tools/flash_update_tool/bin/x86_64/pcieupdateflash -f firmware/cascade_4chips_flash.bin" >&2
+        echo "    4. FULL power-cycle the host (a reboot is NOT enough) to load the new firmware" >&2
+        return 1
+    fi
+
+    [ -e /dev/memx0 ] || { echo "ERROR: /dev/memx0 not present — is the MX3 seated and the sysext merged?" >&2; return 1; }
+    [ -x "$flash" ]   || { echo "ERROR: flash tool not found at ${flash} — install the sysext first." >&2; return 1; }
+    [ -f "$fw" ]      || { echo "ERROR: firmware not found at ${fw} — install the sysext first." >&2; return 1; }
+
+    echo "=== MX3 firmware update (bare metal) ==="
+    echo "Current device firmware:"
+    sed 's/^/  /' /sys/memx0/verinfo 2>/dev/null || echo "  (could not read /sys/memx0/verinfo)"
+    echo ""
+    echo "WARNING: this writes the card's QSPI flash. Do not interrupt it."
+    if [ "$FORCE" != "1" ]; then
+        if { : </dev/tty; } 2>/dev/null; then
+            printf 'Flash %s now? [y/N] ' "$fw"
+            read -r ans </dev/tty || ans=""
+            case "$ans" in y|Y|yes|YES) ;; *) echo "Aborted."; return 1 ;; esac
+        else
+            echo "ERROR: no terminal to confirm; re-run with --force to flash non-interactively." >&2
+            return 1
+        fi
+    fi
+
+    # Release the device: stop the daemon, unload the module (the flasher does
+    # direct PCIe access and needs the driver out of the way).
+    echo "Stopping mxa-manager and unloading the driver..."
+    systemctl stop mxa-manager 2>/dev/null || true
+    if lsmod 2>/dev/null | awk '{print $1}' | grep -qx memx_cascade_plus_pcie; then
+        rmmod memx_cascade_plus_pcie || {
+            echo "ERROR: could not unload memx_cascade_plus_pcie (in use?). Stop any consumers (e.g. docker stop frigate) and retry." >&2
+            return 1
+        }
+    fi
+
+    echo "Flashing..."
+    if ! "$flash" -f "$fw"; then
+        echo "ERROR: firmware flash failed." >&2
+        return 1
+    fi
+
+    echo ""
+    echo "=== Firmware flash complete ==="
+    echo "A FULL POWER-CYCLE is now required (power off, then on — a soft reboot is"
+    echo "NOT enough; the card only loads firmware from QSPI at power-on)."
+    echo "After power-on, verify: cat /sys/memx0/verinfo"
+    return 0
+}
+
 # if_real: run a command unless --dry-run is set, in which case print what
 # would have been run. For redirections and heredocs, gate the entire block
 # manually with `if [ "$DRY_RUN" = "1" ]; then ... else ... fi` since the
@@ -294,6 +377,8 @@ POOL_NAME=""
 PERSIST_PATH=""
 CHECK_MODE=0
 DRY_RUN=0
+UPDATE_FW_MODE=0
+FORCE=0
 
 for arg in "$@"; do
     case "$arg" in
@@ -311,6 +396,8 @@ for arg in "$@"; do
             ;;
         --check) CHECK_MODE=1 ;;
         --dry-run) DRY_RUN=1 ;;
+        --update-firmware) UPDATE_FW_MODE=1 ;;
+        --force) FORCE=1 ;;
         --help)
             echo "Usage: sudo ./install.sh [OPTIONS] [path-to-memryx.raw]"
             echo ""
@@ -320,12 +407,15 @@ for arg in "$@"; do
             echo "  --pool=NAME                   ZFS pool for persistent config (e.g., fast)"
             echo "  --persist-path=PATH           Exact path for persistent config"
             echo "  --check                       Probe an existing install (read-only) and report status"
+            echo "  --update-firmware             Flash the bundled MX3 firmware (BARE METAL ONLY; needs the sysext installed)"
+            echo "  --force                       With --update-firmware: flash without the interactive prompt"
             echo "  --dry-run                     Validate everything (downloads, checksums, network) without modifying the system"
             echo "  --help                        Show this help"
             echo ""
             echo "Examples:"
             echo "  sudo ./install.sh --pool=fast"
             echo "  sudo ./install.sh --check"
+            echo "  sudo ./install.sh --update-firmware"
             echo "  sudo ./install.sh --dry-run"
             echo "  sudo ./install.sh /tmp/memryx-input.raw"
             echo "  curl -fsSL <url>/install.sh | sudo bash"
@@ -360,6 +450,13 @@ fi
 if [ "$(id -u 2>/dev/null)" != "0" ]; then
     echo "ERROR: must run as root (use sudo)" >&2
     exit 1
+fi
+
+# --update-firmware is standalone (operates on an already-installed sysext);
+# it doesn't need the lib, pool resolution, or a release download.
+if [ "$UPDATE_FW_MODE" = "1" ]; then
+    do_update_firmware
+    exit $?
 fi
 
 # Persistence only works if --persist-path is the exact location the

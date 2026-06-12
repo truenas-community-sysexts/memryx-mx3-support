@@ -6,6 +6,7 @@
   "memryx": {
     "sdk": "2.1",
     "driver_ref": "v2.1.0",
+    "firmware_ref": "v2.2.0",
     "driver_repo": "memryx/mx3_driver_pub",
     "apt_channel": "stable"
   }

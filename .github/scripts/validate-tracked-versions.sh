@@ -76,6 +76,14 @@ mx_ref = memryx.get("driver_ref")
 if not isinstance(mx_ref, str) or not driver_ref_re.match(mx_ref):
     fail(f"'memryx.driver_ref' missing or malformed (got {mx_ref!r}); expected a mx3_driver_pub tag like v2.1.0")
 
+# Firmware is sourced from a separate ref: the v2.1.0-tag firmware predates the
+# anti-rollback cnt>=6 bump the SDK 2.1.x runtime requires, so we ship the
+# newer firmware (e.g. v2.2.0) while the kernel module still builds from
+# driver_ref. Same tag-shape as driver_ref.
+mx_fw_ref = memryx.get("firmware_ref")
+if not isinstance(mx_fw_ref, str) or not driver_ref_re.match(mx_fw_ref):
+    fail(f"'memryx.firmware_ref' missing or malformed (got {mx_fw_ref!r}); expected a mx3_driver_pub tag like v2.2.0")
+
 mx_repo = memryx.get("driver_repo")
 if not isinstance(mx_repo, str) or not mx_repo.strip():
     fail(f"'memryx.driver_repo' missing or empty (got {mx_repo!r})")
@@ -90,5 +98,5 @@ if mx_channel not in ("stable", "early_access"):
     fail(f"'memryx.apt_channel' must be 'stable' or 'early_access' (got {mx_channel!r})")
 
 print(f"tracked-versions OK: TrueNAS {tn_version} ({tn_train}), MemryX SDK {mx_sdk} "
-      f"(driver {mx_ref} from {mx_repo}, apt channel {mx_channel})")
+      f"(driver {mx_ref}, firmware {mx_fw_ref} from {mx_repo}, apt channel {mx_channel})")
 PY

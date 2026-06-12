@@ -9,6 +9,25 @@ the sibling [coral-pcie-support](https://github.com/truenas-community-sysexts/co
 and [hailo8-support](https://github.com/truenas-community-sysexts/hailo8-support)
 CI/CD approach.
 
+### Hardware bring-up fixes (r2–r4)
+
+- **r2** — prerelease `install.sh` couldn't fetch `memryx-lib.sh` from
+  `releases/latest` (a fresh repo has no Latest); now bundled in the `.raw` and
+  extracted from a local image.
+- **r3** — `mxa-manager` died with `Config file not found at
+  /etc/memryx/mxa_manager.conf` (the SDK 2.1 binary reads that hardcoded path
+  unconditionally; a sysext can't ship `/etc`). The unit now copies a bundled
+  conf into `/etc/memryx/` via `ExecStartPre` on every start.
+- **r4** — **firmware anti-rollback**: the SDK 2.1 runtime requires firmware
+  cnt ≥ 6, but the `v2.1.0`-tag firmware we shipped was the stale cnt-5 image
+  (cards failed with `accelerator has <garbage> chips`). Firmware now comes from
+  a separate **`firmware_ref`** (`v2.2.0`, cnt ≥ 6); added `install.sh
+  --update-firmware` with the bundled flash tools, gated to **bare metal** only
+  (VFIO blocks flashing from a passthrough VM). Documented the full
+  hardware-confirmed recipe: firmware ≥ 6 (bare-metal flash + power-cycle) +
+  Frigate as a **privileged** Custom App (SYS_RAWIO insufficient) with
+  `device: PCIe:0`.
+
 ### Added
 
 - **Full Frigate-ready host stack in one sysext.** Ships the MX3 PCIe kernel

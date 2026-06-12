@@ -15,6 +15,10 @@ on:
         description: 'mx3_driver_pub git ref to build the kernel module from (blank = latest tracked)'
         required: false
         default: ''
+      firmware_ref:
+        description: 'mx3_driver_pub git ref to source firmware + flash tools from (blank = latest tracked)'
+        required: false
+        default: ''
       driver_repo:
         description: 'mx3_driver_pub repo (blank = latest tracked)'
         required: false
@@ -49,6 +53,9 @@ on:
         type: string
         required: true
       driver_ref:
+        type: string
+        required: true
+      firmware_ref:
         type: string
         required: true
       driver_repo:
@@ -88,6 +95,7 @@ jobs:
       truenas_version: ${{ steps.params.outputs.truenas_version }}
       memryx_sdk: ${{ steps.params.outputs.memryx_sdk }}
       driver_ref: ${{ steps.params.outputs.driver_ref }}
+      firmware_ref: ${{ steps.params.outputs.firmware_ref }}
       driver_repo: ${{ steps.params.outputs.driver_repo }}
       apt_channel: ${{ steps.params.outputs.apt_channel }}
       train_name: ${{ steps.params.outputs.train_name }}
@@ -109,6 +117,7 @@ jobs:
           INPUT_TRUENAS_VERSION: ${{ inputs.truenas_version }}
           INPUT_MEMRYX_SDK: ${{ inputs.memryx_sdk }}
           INPUT_DRIVER_REF: ${{ inputs.driver_ref }}
+          INPUT_FIRMWARE_REF: ${{ inputs.firmware_ref }}
           INPUT_DRIVER_REPO: ${{ inputs.driver_repo }}
           INPUT_APT_CHANNEL: ${{ inputs.apt_channel }}
           INPUT_TRAIN_NAME: ${{ inputs.train_name }}
@@ -125,6 +134,7 @@ jobs:
           print(d['truenas']['train'])
           print(d['memryx']['sdk'])
           print(d['memryx']['driver_ref'])
+          print(d['memryx'].get('firmware_ref', d['memryx']['driver_ref']))
           print(d['memryx'].get('driver_repo', 'memryx/mx3_driver_pub'))
           print(d['memryx'].get('apt_channel', 'stable'))
           ")
@@ -132,13 +142,15 @@ jobs:
           TRACKED_TRAIN=$(sed -n '2p' <<< "$TRACKED")
           TRACKED_SDK=$(sed -n '3p' <<< "$TRACKED")
           TRACKED_REF=$(sed -n '4p' <<< "$TRACKED")
-          TRACKED_REPO=$(sed -n '5p' <<< "$TRACKED")
-          TRACKED_CHANNEL=$(sed -n '6p' <<< "$TRACKED")
+          TRACKED_FW_REF=$(sed -n '5p' <<< "$TRACKED")
+          TRACKED_REPO=$(sed -n '6p' <<< "$TRACKED")
+          TRACKED_CHANNEL=$(sed -n '7p' <<< "$TRACKED")
 
           VERSION="${INPUT_TRUENAS_VERSION:-$TRACKED_VERSION}"
           TRAIN="${INPUT_TRAIN_NAME:-$TRACKED_TRAIN}"
           SDK="${INPUT_MEMRYX_SDK:-$TRACKED_SDK}"
           REF="${INPUT_DRIVER_REF:-$TRACKED_REF}"
+          FW_REF="${INPUT_FIRMWARE_REF:-$TRACKED_FW_REF}"
           REPO="${INPUT_DRIVER_REPO:-$TRACKED_REPO}"
           CHANNEL="${INPUT_APT_CHANNEL:-$TRACKED_CHANNEL}"
           RUNNER="${INPUT_RUNNER}"
@@ -157,6 +169,7 @@ jobs:
             echo "truenas_version=${VERSION}"
             echo "memryx_sdk=${SDK}"
             echo "driver_ref=${REF}"
+            echo "firmware_ref=${FW_REF}"
             echo "driver_repo=${REPO}"
             echo "apt_channel=${CHANNEL}"
             echo "train_name=${TRAIN}"
@@ -169,6 +182,7 @@ jobs:
           echo "  truenas_version=${VERSION}"
           echo "  memryx_sdk=${SDK}"
           echo "  driver_ref=${REF}"
+          echo "  firmware_ref=${FW_REF}"
           echo "  driver_repo=${REPO}"
           echo "  apt_channel=${CHANNEL}"
           echo "  train_name=${TRAIN}"
@@ -489,6 +503,24 @@ jobs:
           modinfo "${PCIE_DIR}/memx_cascade_plus_pcie.ko"
           ls -lh "${PCIE_DIR}/memx_cascade_plus_pcie.ko"
 
+      - name: Clone firmware + flash tools (firmware_ref)
+        run: |
+          # Firmware comes from a SEPARATE ref than the kernel module: the
+          # driver_ref (v2.1.0) firmware predates the anti-rollback cnt>=6 bump
+          # the SDK 2.1.x runtime enforces, so a device flashed with it fails
+          # with "accelerator has <garbage> chips" / "anti_rollback cnt >= 6".
+          # firmware_ref (e.g. v2.2.0) carries the cnt>=6 image. We also grab
+          # the prebuilt x86_64 flash tools (GPLv2+) so install.sh can offer a
+          # firmware update on bare-metal hosts.
+          DRIVER_REPO="${{ needs.resolve.outputs.driver_repo }}"
+          FW_REF="${{ needs.resolve.outputs.firmware_ref }}"
+          echo "Cloning firmware/tools from ${DRIVER_REPO} at ${FW_REF}"
+          git clone --depth 1 --branch "${FW_REF}" "https://github.com/${DRIVER_REPO}.git" /tmp/mx3-firmware
+          echo "=== firmware blobs (${FW_REF}) ==="
+          ls -lh /tmp/mx3-firmware/firmware/*.bin
+          echo "=== prebuilt x86_64 flash tools ==="
+          ls -lh /tmp/mx3-firmware/tools/flash_update_tool/bin/x86_64/ || true
+
       # -- Fetch the redistributable userspace stack from MemryX's apt repo --
       # libmemx.so (the userspace C API) is NOT in the public source mirror;
       # memx-accl / mxa-manager build-depend on the memx-drivers package for it.
@@ -604,26 +636,47 @@ jobs:
             exit 1
           fi
 
-          # --- MemryX CLI/helper binaries (best-effort: benchmark, flash tool) ---
+          # --- MemryX CLI/helper binaries from the debs (best-effort) ---
           # Names vary across SDK releases; ship the common ones if present so
           # operators can verify on-host without the full SDK. Not required.
-          for bin in acclBench mx_bench memx_flash mx_flash flash_update_tool; do
+          for bin in acclBench mx_bench mxfw_read_fwver; do
             if [ -f "${STAGE}/usr/bin/${bin}" ]; then
               cp "${STAGE}/usr/bin/${bin}" "${SYSEXT_ROOT}/usr/bin/${bin}"
               chmod +x "${SYSEXT_ROOT}/usr/bin/${bin}"
             fi
           done
 
-          # --- Firmware blobs (from the GPL-mirror repo; license explicitly
-          # permits redistributing exact copies). The driver's request_firmware
-          # path looks for cascade.bin under /lib/firmware; merged-usr maps
-          # /usr/lib/firmware -> /lib/firmware. We ship all variants so the
-          # optional on-host flash step can pick the right one. ---
+          # --- Firmware blobs (from firmware_ref; license permits redistributing
+          # exact copies). Sourced from firmware_ref (e.g. v2.2.0) NOT driver_ref,
+          # because the driver_ref firmware predates the anti-rollback cnt>=6
+          # bump the SDK 2.1.x runtime enforces. We ship all variants so the
+          # on-host flash step can pick the right one (M.2 default =
+          # cascade_4chips_flash.bin). merged-usr maps /usr/lib/firmware ->
+          # /lib/firmware. ---
           mkdir -p "${SYSEXT_ROOT}/usr/lib/firmware"
-          if compgen -G "/tmp/mx3-driver/firmware/*.bin" > /dev/null; then
-            cp /tmp/mx3-driver/firmware/*.bin "${SYSEXT_ROOT}/usr/lib/firmware/"
+          if compgen -G "/tmp/mx3-firmware/firmware/*.bin" > /dev/null; then
+            cp /tmp/mx3-firmware/firmware/*.bin "${SYSEXT_ROOT}/usr/lib/firmware/"
           else
-            echo "::error title=firmware::no firmware blobs found under /tmp/mx3-driver/firmware/"
+            echo "::error title=firmware::no firmware blobs found under /tmp/mx3-firmware/firmware/"
+            exit 1
+          fi
+
+          # --- Firmware flash tools (prebuilt x86_64, GPLv2+, from firmware_ref).
+          # install.sh --update-firmware uses pcieupdateflash on bare-metal hosts.
+          # Bundled under /usr/lib/memryx so they don't shadow anything in PATH. ---
+          FLASH_BIN_DIR="/tmp/mx3-firmware/tools/flash_update_tool/bin/x86_64"
+          mkdir -p "${SYSEXT_ROOT}/usr/lib/memryx/flash"
+          flash_ok=0
+          for tool in pcieupdateflash check_version read_fwver; do
+            if [ -f "${FLASH_BIN_DIR}/${tool}" ]; then
+              cp "${FLASH_BIN_DIR}/${tool}" "${SYSEXT_ROOT}/usr/lib/memryx/flash/${tool}"
+              chmod +x "${SYSEXT_ROOT}/usr/lib/memryx/flash/${tool}"
+              [ "$tool" = "pcieupdateflash" ] && flash_ok=1
+            fi
+          done
+          if [ "$flash_ok" -ne 1 ]; then
+            echo "::error title=flash-tool::pcieupdateflash not found under ${FLASH_BIN_DIR}; the firmware_ref layout may have changed."
+            ls -la "${FLASH_BIN_DIR}" 2>/dev/null || true
             exit 1
           fi
 
@@ -730,6 +783,7 @@ jobs:
           require_file "usr/lib/memryx/memryx-preinit.sh"
           require_file "usr/lib/memryx/memryx-lib.sh"
           require_file "usr/lib/memryx/mxa_manager.conf"
+          require_elf  "usr/lib/memryx/flash/pcieupdateflash"
 
           # At least one libmemx*/libmx* ELF shared object.
           LIBMX_REL=$(cd "${SMOKE_TMP}/extract" && \
@@ -779,6 +833,7 @@ jobs:
           MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
           MEMRYX_PKG_VERSION: ${{ steps.userspace.outputs.memryx_pkg_version }}
           DRIVER_REF: ${{ needs.resolve.outputs.driver_ref }}
+          FIRMWARE_REF: ${{ needs.resolve.outputs.firmware_ref }}
           DRIVER_REPO: ${{ needs.resolve.outputs.driver_repo }}
           APT_CHANNEL: ${{ needs.resolve.outputs.apt_channel }}
           RUNNER_IMAGE: ${{ needs.resolve.outputs.runner }}
@@ -786,13 +841,14 @@ jobs:
           RUN_NUMBER: ${{ steps.build_id.outputs.run_number }}
           REPO: ${{ github.repository }}
         run: |
-          envsubst '${TRUENAS_VERSION} ${TRAIN_NAME} ${MEMRYX_SDK} ${MEMRYX_PKG_VERSION} ${DRIVER_REF} ${DRIVER_REPO} ${APT_CHANNEL} ${REAL_KVER} ${RUNNER_IMAGE} ${BUILD_SHA} ${REPO} ${RUN_NUMBER}' > release-notes.md <<'RELEASE_NOTES'
+          envsubst '${TRUENAS_VERSION} ${TRAIN_NAME} ${MEMRYX_SDK} ${MEMRYX_PKG_VERSION} ${DRIVER_REF} ${FIRMWARE_REF} ${DRIVER_REPO} ${APT_CHANNEL} ${REAL_KVER} ${RUNNER_IMAGE} ${BUILD_SHA} ${REPO} ${RUN_NUMBER}' > release-notes.md <<'RELEASE_NOTES'
           ## MemryX MX3 Sysext for TrueNAS SCALE ${TRUENAS_VERSION} (${TRAIN_NAME})
 
           | Field | Value |
           | --- | --- |
           | MemryX SDK | `${MEMRYX_SDK}` (packages `${MEMRYX_PKG_VERSION}`, apt channel `${APT_CHANNEL}`) |
           | Driver source | [`${DRIVER_REF}`](https://github.com/${DRIVER_REPO}/tree/${DRIVER_REF}) |
+          | Firmware source | [`${FIRMWARE_REF}`](https://github.com/${DRIVER_REPO}/tree/${FIRMWARE_REF}) (anti-rollback cnt ≥ 6) |
           | Target kernel | `${REAL_KVER}` |
           | Built on | `${RUNNER_IMAGE}` |
           | Source commit | [`${BUILD_SHA}`](https://github.com/${REPO}/commit/${BUILD_SHA}) |
@@ -802,6 +858,12 @@ jobs:
           detector connects to the host `mxa-manager` daemon over `/run/mxa_manager`
           and to `/dev/memx0`.
 
+          > **Requirements (read these):** the card's firmware must be at
+          > anti-rollback **cnt ≥ 6** (run `sudo ./install.sh --update-firmware` on
+          > **bare metal** — it can't be flashed from inside a passthrough VM), and
+          > Frigate must run as a **privileged** container with `device: PCIe:0`.
+          > See the [README](https://github.com/${REPO}#using-with-frigate).
+
           ### Included Components
           - `memx_cascade_plus_pcie.ko` — MX3 PCIe kernel module (built against kernel `${REAL_KVER}`)
           - `libmemx*` / `libmx*` — MemryX userspace C API + C++ runtime (`mx_accl`)
@@ -810,7 +872,8 @@ jobs:
           - `mxa-manager.service` — runs the daemon, exposes `/run/mxa_manager`
           - `memryx-preinit.sh` — TrueNAS PREINIT script bundled inside the sysext
           - `51-memryx-udev.rules` — udev rules for `/dev/memx*` permissions
-          - `cascade*.bin` — MX3 firmware (redistributable exact copies)
+          - `cascade*.bin` — MX3 firmware (from `${FIRMWARE_REF}`, anti-rollback cnt ≥ 6)
+          - `flash/pcieupdateflash` + `read_fwver` — firmware flash tools (for `--update-firmware`)
 
           ### Install
           ```bash
@@ -819,7 +882,7 @@ jobs:
 
           ### Verify
           ```bash
-          sudo ./install.sh --check
+          sudo ./install.sh --check                 # includes a firmware anti-rollback check
           ls /dev/memx0 && systemctl status mxa-manager
           ```
 

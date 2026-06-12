@@ -32,7 +32,8 @@ The `memryx.raw` sysext contains:
 | `libmemx*` / `libmx*` | Userspace C API + `mx_accl` C++ runtime | MemryX `memx-drivers`/`memx-accl` debs; GPLv2 / MPL-2.0 |
 | `mxa_manager` + `mxa-manager.service` | Device-management daemon, exposes `/run/mxa_manager` | [MxAccl](https://github.com/memryx/MxAccl), MPL-2.0 |
 | `memryx-load.service` | Loads the kernel module on boot (oneshot) | this repo, MIT |
-| `cascade*.bin` | MX3 firmware blobs | MemryX firmware license (redistributable exact copies) |
+| `cascade*.bin` | MX3 firmware (anti-rollback cnt ≥ 6) | MemryX firmware license (redistributable exact copies) |
+| `flash/pcieupdateflash`, `read_fwver` | Firmware flash tools (for `--update-firmware`) | mx3_driver_pub `tools/`, GPLv2+ |
 | `51-memryx-udev.rules` | `/dev/memx*` permissions (`0666`) | this repo, MIT |
 
 Everything is bundled in the sysext — there is **no install-time download from
@@ -52,6 +53,26 @@ one MemryX SDK at a time (currently **SDK 2.1**). CI tracks
 and builds the SDK it pins, exactly the way the sibling Hailo sysext caps at
 Frigate's HailoRT pin. The current target is recorded in
 [`.github/tracked-versions.json`](.github/tracked-versions.json).
+
+## ⚠️ Hard requirements (learned the hard way)
+
+Getting the MX3 working with Frigate has three non-obvious gates beyond installing
+the sysext. Miss any one and you'll see `Init DFP Runner failed` /
+`accelerator has <garbage> chips`:
+
+1. **Bare-metal TrueNAS for the firmware step.** The card's firmware must be at
+   **anti-rollback counter ≥ 6** for the SDK 2.1 runtime. If yours is older,
+   `sudo ./install.sh --update-firmware` flashes it — but **only on bare metal**.
+   Inside a **passthrough VM** the flash is silently swallowed by VFIO; you must
+   flash from the **hypervisor host** and **fully power-cycle** (a reboot doesn't
+   re-load QSPI firmware). See [Firmware](#firmware).
+2. **Frigate must run privileged.** Its detector opens `/dev/memx0` directly and
+   `mmap`s the chip's BAR memory, which a non-privileged container can't do
+   (`cap_add: SYS_RAWIO` is **not** enough — it must be `privileged: true`). The
+   TrueNAS **catalog** Frigate app has no privileged toggle, so you must run
+   Frigate as a **Custom App** (compose). See [Using with Frigate](#using-with-frigate).
+3. **`device: PCIe:0` in the detector config** — a bare `PCIe` crashes the
+   detector with `IndexError`.
 
 ## Quick Start
 
@@ -104,26 +125,64 @@ ls /run/mxa_manager                        # socket dir present
 curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/uninstall.sh | sudo bash
 ```
 
-## Using with Frigate
+## Firmware
 
-Frigate's `memryx` detector connects to the host daemon, so the container needs
-the device **and** the manager socket (and privileged mode):
+The MX3 boots its firmware from on-board QSPI flash. The SDK 2.1 runtime requires
+the firmware's **anti-rollback counter to be ≥ 6**; cards that shipped with an
+older counter fail with `accelerator has <garbage> chips` even though the device
+is otherwise healthy. Check yours:
 
-### 1. Pass through the device and socket
-
-In TrueNAS Apps (or docker-compose), add:
-
-```yaml
-devices:
-  - /dev/memx0
-volumes:
-  - /run/mxa_manager:/run/mxa_manager
-privileged: true
+```bash
+cat /sys/memx0/verinfo            # healthy device; FW_CommitID is the firmware rev
 ```
 
-### 2. Configure the detector
+If a detector reports the chip-count error, update the firmware. **This only works
+on bare metal:**
 
-In your Frigate `config.yaml`:
+```bash
+sudo ./install.sh --update-firmware    # bare-metal TrueNAS: flashes + tells you to power-cycle
+```
+
+**On a hypervisor with PCIe passthrough, you cannot flash from inside the TrueNAS
+VM** — VFIO silently swallows the QSPI writes (the flash reports success but
+nothing changes). Flash from the **hypervisor host** instead: shut down the VM,
+`echo <BDF> > /sys/bus/pci/drivers/vfio-pci/unbind` (BDF from `lspci -d 1fe9:`),
+run `mx3_driver_pub/tools/flash_update_tool/bin/x86_64/pcieupdateflash -f
+.../firmware/cascade_4chips_flash.bin`, then **fully power off and on** the
+physical host (a reboot does not re-load QSPI firmware). See
+[docs/troubleshooting.md](docs/troubleshooting.md#firmware).
+
+## Using with Frigate
+
+Frigate's `memryx` detector needs a **privileged** container with the device, the
+manager socket, and `device: PCIe:0`. The TrueNAS **catalog** Frigate app cannot
+do privileged — install Frigate as a **Custom App** (Apps → Discover → *Install
+via YAML*).
+
+### 1. Custom App compose
+
+```yaml
+services:
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:0.17.1
+    privileged: true                       # REQUIRED — SYS_RAWIO alone is NOT enough
+    shm_size: "512mb"                       # size to your camera count
+    devices:
+      - /dev/memx0:/dev/memx0
+    volumes:
+      - /run/mxa_manager:/run/mxa_manager   # the host daemon's socket
+      - <your frigate config dataset>:/config
+      - <your media dataset>:/media/frigate
+    ports: ["8971:8971", "8554:8554", "8555:8555/tcp", "8555:8555/udp"]
+    restart: unless-stopped
+```
+
+> **`privileged: true` is mandatory.** The detector `mmap`s the chip's PCIe BAR
+> memory; a non-privileged container can open `/dev/memx0` but reads garbage back
+> (the `301989888 chips` error). `cap_add: [SYS_RAWIO]` is **not** sufficient —
+> confirmed on hardware.
+
+### 2. Detector config
 
 ```yaml
 detectors:
@@ -132,21 +191,13 @@ detectors:
     device: PCIe:0     # REQUIRED: ":0" = first MX3 (/dev/memx0)
 ```
 
-> **Don't omit `device: PCIe:0`.** Frigate's `device` field defaults to `"PCIe"`,
-> but its detector parses it as `device.split(":")[1]` — a bare `"PCIe"` raises
-> `IndexError: list index out of range` and the detector process crashes. The
-> `:0` index (matching `/dev/memx0`) is mandatory.
+> **Don't omit `device: PCIe:0`.** Frigate's `device` defaults to `"PCIe"` but is
+> parsed as `device.split(":")[1]` — a bare `"PCIe"` raises `IndexError` and the
+> detector crashes.
 
 `.dfp` models are downloaded by Frigate at runtime (default `model_type: yolonas`).
 See the [MemryX + Frigate guide](https://devblog.memryx.com/memryx-frigate-manual-setup/)
 for model configuration.
-
-> **TrueNAS note:** the official catalog Frigate app has no "privileged" toggle —
-> that lives only on the **Custom App** (docker-compose) install path. Frigate's
-> docs list `privileged: true`, but the heavy device work runs in the host
-> `mxa-manager` daemon, so passing just `/dev/memx0` + the `/run/mxa_manager`
-> volume is worth trying first; switch to a Custom App for `privileged: true` only
-> if device access fails.
 
 ## Important Notes
 

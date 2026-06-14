@@ -27,6 +27,16 @@ CI/CD approach.
   hardware-confirmed recipe: firmware ≥ 6 (bare-metal flash + power-cycle) +
   Frigate as a **privileged** Custom App (SYS_RAWIO insufficient) with
   `device: PCIe:0`.
+- **Driver log-noise patch (build-time, no version change).** `build.yml` now
+  applies `patches/*.patch` to the cloned `mx3_driver_pub` tree before compiling,
+  via the idempotent `.github/scripts/apply-driver-patches.sh`. The first patch
+  gates the un-guarded `fops_read`/`fops_write` `wait timeout N(s), retrying
+  again` `pr_info` logs behind `#ifdef DEBUG` (matching every other diagnostic in
+  that file), so an idle-but-open accelerator — Frigate holding the device
+  between motion-gated detections — no longer floods the kernel log every ~10s on
+  a perfectly healthy card. Upstreamed as `scyto/mx3_driver_pub` branch
+  `gate-fops-timeout-debug-logs` (PR pending); the applier auto-skips the patch
+  once the fix lands in the pinned `driver_ref`.
 
 ### Added
 

@@ -479,6 +479,21 @@ jobs:
           echo "Checked out mx3_driver_pub:"
           git log --oneline -1
 
+      - name: Apply driver patches
+        run: |
+          # Re-apply fixes the pinned driver_ref lacks (see patches/*.patch).
+          # Currently: gate the un-guarded fops_read/fops_write "wait timeout"
+          # pr_info logs behind #ifdef DEBUG so an idle-but-open accelerator
+          # (Frigate between motion-gated detections) doesn't flood the kernel
+          # log every ~10s. The applier is idempotent: it skips any patch
+          # already present in the checked-out ref and fails loud if a patch
+          # no longer applies. Run from the repo checkout (the default cwd) so
+          # it can reach the helper script and patches/. No driver version
+          # change — the patch only touches log gating.
+          .github/scripts/apply-driver-patches.sh \
+            /tmp/mx3-driver \
+            "${GITHUB_WORKSPACE}/patches"
+
       - name: Install kernel-matching GCC
         run: |
           if ! command -v "$KERNEL_GCC" &>/dev/null; then

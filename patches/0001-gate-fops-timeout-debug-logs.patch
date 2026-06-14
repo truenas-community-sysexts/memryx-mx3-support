@@ -1,0 +1,42 @@
+kdriver: gate fops_read/fops_write timeout logs behind #ifdef DEBUG
+
+Re-applied at build time to the pinned mx3_driver_pub tag (v2.1.0). memx_fops_read
+/memx_fops_write log an un-guarded info-level "wait timeout N(s), retrying again"
+on every wait_event_interruptible_timeout() timeout and re-arm. On a healthy but
+idle device (Frigate holding the accelerator between motion-gated detections) the
+10s read timeout fires every ~10s indefinitely, flooding the kernel log. Every
+other diagnostic in this file is already wrapped in #ifdef DEBUG; these two were
+the only un-guarded ones. Our sysext builds non-DEBUG (kbuild EXTRA_CFLAGS has no
+-DDEBUG), so wrapping them silences the spam while keeping them in debug builds.
+
+No functional change (the wait loops are driven by while (wq_status < 1); the
+gated if/pr_info was diagnostic only) and NO driver version change. Upstreamed as
+scyto/mx3_driver_pub branch gate-fops-timeout-debug-logs (PR pending) -> the
+applier skips this once it lands in the pinned tag.
+
+diff --git a/kdriver/linux/pcie/memx_cascade_pciemain.c b/kdriver/linux/pcie/memx_cascade_pciemain.c
+index 79cfa39..0eb9167 100644
+--- a/kdriver/linux/pcie/memx_cascade_pciemain.c
++++ b/kdriver/linux/pcie/memx_cascade_pciemain.c
+@@ -470,8 +470,10 @@ static ssize_t memx_fops_read(struct file *filp, char __user *buf, size_t count,
+ 				break;
+ 			}
+ 
++#ifdef DEBUG
+ 			if (wq_status < 1)
+ 				pr_info("memryx: fops_read: wait timeout 10(s), retrying again\n");
++#endif
+ 
+ 		} while (wq_status < 1);
+ 		if (wq_status >= 1) {
+@@ -564,8 +566,10 @@ static ssize_t memx_fops_write(struct file *filp, const char __user *buf, size_t
+ 			pr_warn("memryx: fops_write: cancelled by interrupt signal\n");
+ 			break;
+ 		}
++#ifdef DEBUG
+ 		if (wq_status < 1)
+ 			pr_info("memryx: fops_write: wait timeout 1(s), retrying again\n");
++#endif
+ 
+ 	} while (wq_status < 1);
+ 	if (wq_status >= 1) {

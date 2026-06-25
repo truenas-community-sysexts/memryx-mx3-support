@@ -233,7 +233,7 @@ jobs:
       # and header-detection logic are device-independent.)
       - name: Restore cached TrueNAS ISO
         id: iso-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: /tmp/truenas.iso
           key: truenas-iso-${{ needs.resolve.outputs.truenas_version }}
@@ -261,14 +261,14 @@ jobs:
 
       - name: Save TrueNAS ISO to cache
         if: steps.iso-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: /tmp/truenas.iso
           key: truenas-iso-${{ needs.resolve.outputs.truenas_version }}
 
       - name: Restore cached kernel headers
         id: headers-cache
-        uses: actions/cache/restore@v5
+        uses: actions/cache/restore@v6
         with:
           path: /tmp/kernel-headers
           key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}
@@ -411,7 +411,7 @@ jobs:
 
       - name: Save kernel headers to cache
         if: steps.headers-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v5
+        uses: actions/cache/save@v6
         with:
           path: /tmp/kernel-headers
           key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}

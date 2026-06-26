@@ -539,12 +539,20 @@ jobs:
           # default target hardcodes /lib/modules/$(uname -r)/build and also
           # builds a userspace test `app`; we invoke kbuild directly so it
           # targets the TrueNAS kernel, not the runner's. INCLUDES mirrors the
-          # Makefile (-I<repo>/kdriver/include).
+          # Makefile (-I<repo>/kdriver/include), where memx_ioctl.h lives.
+          #
+          # The include dir is passed via KCPPFLAGS, NOT EXTRA_CFLAGS. Both the
+          # MemryX Makefile and this step historically used a command-line
+          # EXTRA_CFLAGS, which worked on the 25.x kernel (6.12) but is dropped
+          # by the TrueNAS 26 kernel's (6.18) Kbuild — the module then can't
+          # find its own memx_ioctl.h ("No such file or directory"). KCPPFLAGS
+          # is kbuild's documented env var for extra C-preprocessor flags
+          # (include dirs) and is applied to the compile on both 6.12 and 6.18.
           PCIE_DIR="/tmp/mx3-driver/kdriver/linux/pcie"
           KERNEL_DIR="/tmp/kernel-headers/linux-headers-${KVER}"
           INCLUDES="-I/tmp/mx3-driver/kdriver/include"
           echo "Building memx_cascade_plus_pcie.ko against kernel ${KVER} with ${KERNEL_GCC}..."
-          make -C "$KERNEL_DIR" M="$PCIE_DIR" EXTRA_CFLAGS="$INCLUDES" CC="$KERNEL_GCC" modules
+          make -C "$KERNEL_DIR" M="$PCIE_DIR" KCPPFLAGS="$INCLUDES" CC="$KERNEL_GCC" modules
           echo "=== Module info ==="
           modinfo "${PCIE_DIR}/memx_cascade_plus_pcie.ko"
           ls -lh "${PCIE_DIR}/memx_cascade_plus_pcie.ko"

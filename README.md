@@ -12,49 +12,7 @@ socket. So this sysext ships the full host stack: the kernel module, the MemryX
 userspace runtime, the `mxa-manager` daemon (as a systemd service), the firmware,
 and udev rules.
 
-## Documentation
-
-| Doc | Contents |
-| --- | --- |
-| [Quick Start](#quick-start) | Install, verify, uninstall |
-| [docs/install.md](docs/install.md) | Install options, persistence, scripts reference |
-| [docs/architecture.md](docs/architecture.md) | Sysext structure, the daemon model, build pipeline, read-only constraints |
-| [docs/build-ci-notes.md](docs/build-ci-notes.md) | Build process, the source-vs-deb split, automated updates, open verification items |
-| [docs/troubleshooting.md](docs/troubleshooting.md) | Kernel mismatch recovery, daemon issues |
-
-## What's Included
-
-The `memryx.raw` sysext contains:
-
-| Component | Description | Source / License |
-| --- | --- | --- |
-| `memx_cascade_plus_pcie.ko` | MX3 PCIe kernel module (built for the exact TrueNAS kernel) | [mx3_driver_pub](https://github.com/memryx/mx3_driver_pub), GPLv2 |
-| `libmemx*` / `libmx*` | Userspace C API + `mx_accl` C++ runtime | MemryX `memx-drivers`/`memx-accl` debs; GPLv2 / MPL-2.0 |
-| `mxa_manager` + `mxa-manager.service` | Device-management daemon, exposes `/run/mxa_manager` | [MxAccl](https://github.com/memryx/MxAccl), MPL-2.0 |
-| `memryx-load.service` | Loads the kernel module on boot (oneshot) | this repo, MIT |
-| `cascade*.bin` | MX3 firmware (anti-rollback cnt ≥ 6) | MemryX firmware license (redistributable exact copies) |
-| `flash/pcieupdateflash`, `read_fwver` | Firmware flash tools (for `--update-firmware`) | mx3_driver_pub `tools/`, GPLv2+ |
-| `51-memryx-udev.rules` | `/dev/memx*` permissions (`0666`) | this repo, MIT |
-
-Everything is bundled in the sysext — there is **no install-time download from
-MemryX**.
-
-## Compatibility
-
-| Device | Supported | Notes |
-| --- | --- | --- |
-| MemryX MX3 M.2 module | Yes | PCIe, primary target. Creates `/dev/memx0`. |
-| MemryX MX3 mini-PCIe / carrier boards | Likely | Same PCIe driver; not yet hardware-verified here |
-| MemryX MX3 USB accelerator | No | Different path; no PCIe kernel module needed |
-
-**Frigate compatibility is SDK-pinned.** Frigate's stable release supports exactly
-one MemryX SDK at a time (currently **SDK 2.1**). CI tracks
-[Frigate's `docker/memryx/user_installation.sh`](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh)
-and builds the SDK it pins, exactly the way the sibling Hailo sysext caps at
-Frigate's HailoRT pin. The current target is recorded in
-[`.github/tracked-versions.json`](.github/tracked-versions.json).
-
-## ⚠️ Hard requirements (learned the hard way)
+## Firmware requirements
 
 Getting the MX3 working with Frigate has three non-obvious gates beyond installing
 the sysext. Miss any one and you'll see `Init DFP Runner failed` /
@@ -73,6 +31,21 @@ the sysext. Miss any one and you'll see `Init DFP Runner failed` /
    Frigate as a **Custom App** (compose). See [Using with Frigate](#using-with-frigate).
 3. **`device: PCIe:0` in the detector config** — a bare `PCIe` crashes the
    detector with `IndexError`.
+
+## Compatibility
+
+| Device | Supported | Notes |
+| --- | --- | --- |
+| MemryX MX3 M.2 module | Yes | PCIe, primary target. Creates `/dev/memx0`. |
+| MemryX MX3 mini-PCIe / carrier boards | Likely | Same PCIe driver; not yet hardware-verified here |
+| MemryX MX3 USB accelerator | No | Different path; no PCIe kernel module needed |
+
+**Frigate compatibility is SDK-pinned.** Frigate's stable release supports exactly
+one MemryX SDK at a time (currently **SDK 2.1**). CI tracks
+[Frigate's `docker/memryx/user_installation.sh`](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh)
+and builds the SDK it pins, exactly the way the sibling Hailo sysext caps at
+Frigate's HailoRT pin. The current target is recorded in
+[`.github/tracked-versions.json`](.github/tracked-versions.json).
 
 ## Quick Start
 
@@ -225,6 +198,33 @@ for model configuration.
   The on-board QSPI flash is **not** re-flashed automatically; see
   [docs/troubleshooting.md](docs/troubleshooting.md) if the firmware version is
   reported as mismatched.
+
+## Documentation
+
+| Doc | Contents |
+| --- | --- |
+| [Quick Start](#quick-start) | Install, verify, uninstall |
+| [docs/install.md](docs/install.md) | Install options, persistence, scripts reference |
+| [docs/architecture.md](docs/architecture.md) | Sysext structure, the daemon model, build pipeline, read-only constraints |
+| [docs/build-ci-notes.md](docs/build-ci-notes.md) | Build process, the source-vs-deb split, automated updates, open verification items |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | Kernel mismatch recovery, daemon issues |
+
+## What's Included
+
+The `memryx.raw` sysext contains:
+
+| Component | Description | Source / License |
+| --- | --- | --- |
+| `memx_cascade_plus_pcie.ko` | MX3 PCIe kernel module (built for the exact TrueNAS kernel) | [mx3_driver_pub](https://github.com/memryx/mx3_driver_pub), GPLv2 |
+| `libmemx*` / `libmx*` | Userspace C API + `mx_accl` C++ runtime | MemryX `memx-drivers`/`memx-accl` debs; GPLv2 / MPL-2.0 |
+| `mxa_manager` + `mxa-manager.service` | Device-management daemon, exposes `/run/mxa_manager` | [MxAccl](https://github.com/memryx/MxAccl), MPL-2.0 |
+| `memryx-load.service` | Loads the kernel module on boot (oneshot) | this repo, MIT |
+| `cascade*.bin` | MX3 firmware (anti-rollback cnt ≥ 6) | MemryX firmware license (redistributable exact copies) |
+| `flash/pcieupdateflash`, `read_fwver` | Firmware flash tools (for `--update-firmware`) | mx3_driver_pub `tools/`, GPLv2+ |
+| `51-memryx-udev.rules` | `/dev/memx*` permissions (`0666`) | this repo, MIT |
+
+Everything is bundled in the sysext — there is **no install-time download from
+MemryX**.
 
 ## License
 

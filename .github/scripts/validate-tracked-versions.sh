@@ -56,6 +56,33 @@ tn_train = truenas.get("train")
 if not isinstance(tn_train, str) or not train_re.match(tn_train):
     fail(f"'truenas.train' missing or malformed (got {tn_train!r}); expected capitalized word (e.g. Goldeye)")
 
+# Preview channel: tracks the latest TrueNAS beta/RC (e.g. 26.0.0-BETA.2) on
+# iso.sys.truenas.net. These ISOs publish no GITMANIFEST, so the runner is
+# pinned here rather than auto-resolved, and the ISO URL is derived from
+# channel_url + version (see check-releases.yml / build.yml).
+preview_ver_re = re.compile(r"^\d+(\.\d+){1,3}-(?:BETA|RC)\.\d+$")
+preview = data.get("truenas_preview")
+if not isinstance(preview, dict):
+    fail("'truenas_preview' key missing or not an object")
+
+pv_version = preview.get("version")
+if not isinstance(pv_version, str) or not preview_ver_re.match(pv_version):
+    fail(f"'truenas_preview.version' missing or malformed (got {pv_version!r}); expected X.Y[.Z]-BETA.N or -RC.N")
+
+pv_train = preview.get("train")
+if not isinstance(pv_train, str) or not train_re.match(pv_train):
+    fail(f"'truenas_preview.train' missing or malformed (got {pv_train!r}); expected capitalized word (e.g. Halfmoon)")
+
+pv_runner = preview.get("runner")
+if not isinstance(pv_runner, str) or not pv_runner.strip():
+    fail(f"'truenas_preview.runner' missing or empty (got {pv_runner!r}); expected a runner image (e.g. ubuntu-24.04)")
+
+pv_channel = preview.get("channel_url")
+if not isinstance(pv_channel, str) or not pv_channel.startswith("https://"):
+    fail(f"'truenas_preview.channel_url' missing or not an https URL (got {pv_channel!r})")
+if not pv_channel.endswith("/"):
+    fail(f"'truenas_preview.channel_url' must end with '/' (got {pv_channel!r}); the ISO URL is derived as <channel_url><version>/TrueNAS-<version>.iso")
+
 # MemryX SDK is a major.minor string (e.g. "2.1") — the value Frigate pins
 # (memx-drivers=2.1.*). The build resolves the concrete patch from the apt
 # pool at build time.
@@ -97,6 +124,7 @@ if not isinstance(mx_channel, str) or not mx_channel.strip():
 if mx_channel not in ("stable", "early_access"):
     fail(f"'memryx.apt_channel' must be 'stable' or 'early_access' (got {mx_channel!r})")
 
-print(f"tracked-versions OK: TrueNAS {tn_version} ({tn_train}), MemryX SDK {mx_sdk} "
+print(f"tracked-versions OK: TrueNAS {tn_version} ({tn_train}), preview {pv_version} "
+      f"({pv_train}, runner {pv_runner}), MemryX SDK {mx_sdk} "
       f"(driver {mx_ref}, firmware {mx_fw_ref} from {mx_repo}, apt channel {mx_channel})")
 PY

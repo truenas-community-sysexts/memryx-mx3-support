@@ -43,12 +43,23 @@ The DKMS module *source* shipped inside `memx-drivers` is ignored — we build t
 
 ## Version tracking ([`check-releases.yml`](../.github/workflows/check-releases.yml))
 
-Daily cron + manual dispatch. Two independent checks; either firing triggers one
-build dispatch with `mark_latest=false` (prerelease gate).
+Daily cron + manual dispatch. Three independent checks; any firing triggers build
+dispatches with `mark_latest=false` (prerelease gate). A **MemryX SDK bump builds
+both** the stable (25.x) and preview (26-beta) targets so each driver release ships
+both; a TrueNAS-only bump on one channel builds just that channel.
 
-- **TrueNAS half**: identical to the sibling sysexts — newest stable `scale-build`
-  tag, train resolved from `download.truenas.com`, gated on the ISO being
-  published. Bumps `truenas.version` / `truenas.train`.
+- **TrueNAS stable half**: identical to the sibling sysexts — newest stable
+  `scale-build` tag, train resolved from `download.truenas.com`, gated on the ISO
+  being published. Bumps `truenas.version` / `truenas.train`.
+- **TrueNAS preview half**: tracks the latest TrueNAS 26 beta (`truenas_preview.version`,
+  e.g. `26.0.0-BETA.2`). 26 betas are not in `scale-build` tags and ship no
+  GITMANIFEST, so it scrapes the browsable channel listing
+  (`truenas_preview.channel_url`, `iso.sys.truenas.net/TrueNAS-26-BETA/`) for the
+  highest `X.Y.Z-BETA.N` / `-RC.N`, gates on the ISO being uploaded, and bumps
+  `truenas_preview.version`. The runner is pinned (`truenas_preview.runner`,
+  `ubuntu-24.04`) since there is no GITMANIFEST to resolve from, and `build.yml`
+  fetches the ISO via an `iso_url` override. Preview builds publish as permanent
+  pre-releases (label `preview-hardware-test`) and are never promoted to Latest.
 - **MemryX half**: parses
   [Frigate's `docker/memryx/user_installation.sh`](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh)
   for the `memx-drivers=<sdk>.*` pin (currently `2.1`). Frigate explicitly
@@ -62,6 +73,12 @@ build dispatch with `mark_latest=false` (prerelease gate).
 ```json
 {
   "truenas": { "version": "25.10.4", "train": "Goldeye" },
+  "truenas_preview": {
+    "version": "26.0.0-BETA.2",     // latest TrueNAS 26 beta; scraped from channel_url
+    "train": "Halfmoon",
+    "runner": "ubuntu-24.04",       // pinned: 26 betas ship no GITMANIFEST to resolve from
+    "channel_url": "https://iso.sys.truenas.net/TrueNAS-26-BETA/"
+  },
   "memryx": {
     "sdk": "2.1",                       // major.minor; userspace debs pinned <sdk>.*
     "driver_ref": "v2.1.0",             // mx3_driver_pub tag the .ko is built from

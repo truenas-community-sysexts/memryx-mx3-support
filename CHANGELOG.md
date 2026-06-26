@@ -40,6 +40,17 @@ CI/CD approach.
 
 ### Added
 
+- **TrueNAS 26 beta preview channel.** A `truenas_preview` block in
+  `tracked-versions.json` tracks the latest TrueNAS 26 beta (e.g. `26.0.0-BETA.2`).
+  Because 26 betas are not in `scale-build` tags and ship no GITMANIFEST,
+  `check-releases.yml` scrapes the browsable channel listing
+  (`iso.sys.truenas.net/TrueNAS-26-BETA/`) for the highest `X.Y.Z-BETA.N`/`-RC.N`,
+  ISO-gates it, and `build.yml` fetches the ISO via an `iso_url` override against a
+  pinned runner. A MemryX SDK bump now dispatches **both** a stable (25.x) and a
+  preview (26-beta) build; a TrueNAS-only bump on one channel builds just that
+  channel. Preview builds publish as permanent pre-releases (label
+  `preview-hardware-test`) and are never promoted to Latest, so stable installs are
+  unaffected; `promote.yml` additionally refuses any `BETA`/`RC` tag.
 - **Full Frigate-ready host stack in one sysext.** Ships the MX3 PCIe kernel
   module, the MemryX userspace runtime (`libmemx` / `mx_accl`), the `mxa-manager`
   daemon, firmware, udev rules, and the boot-time PREINIT activation — everything

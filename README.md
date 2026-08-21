@@ -60,6 +60,7 @@ The table below is generated from this repo's **actual published releases**, so 
 | --- | --- | --- | --- | --- |
 | Stable | 25.10.4 (Goldeye) | `6.12.91-production+truenas` | MemryX SDK 2.1 | [`v25.10.4-memryx2.1-r6`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v25.10.4-memryx2.1-r6) |
 | Stable | 25.10.3 (Goldeye) | `6.12.33-production+truenas` | MemryX SDK 2.1 | [`v25.10.3-memryx2.1-r10`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v25.10.3-memryx2.1-r10) |
+| Preview (beta) | 26.0.0-BETA.3 (Halfmoon) | `6.18.42-production+truenas` | MemryX SDK 2.1 | [`v26.0.0-BETA.3-memryx2.1-r13`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v26.0.0-BETA.3-memryx2.1-r13) |
 | Preview (beta) | 26.0.0-BETA.2 (Halfmoon) | `6.18.23-production+truenas` | MemryX SDK 2.1 | [`v26.0.0-BETA.2-memryx2.1-r9`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v26.0.0-BETA.2-memryx2.1-r9) |
 <!-- END supported-versions -->
 

@@ -9,6 +9,14 @@ the sibling [coral-pcie-support](https://github.com/truenas-community-sysexts/co
 and [hailo8-support](https://github.com/truenas-community-sysexts/hailo8-support)
 CI/CD approach.
 
+### Fixed
+
+- **`/dev/memx0` is created `crw-rw-rw-` again.** The upstream PCIe header defines the node mode
+  as `0x0666` (hex, 0o3146), so the device came up `c--xr-SrwT`, and the sysext udev rule did not
+  correct it (seen on TrueNAS 26.0.0-BETA.3 hardware). New build-time patch
+  `patches/0002-pcie-devnode-mode-octal.patch` makes it octal `0666` in both driver copies; the
+  applier skips it once upstream fixes the pinned tag.
+
 ### Hardware bring-up fixes (r2–r4)
 
 - **r2** — prerelease `install.sh` couldn't fetch `memryx-lib.sh` from

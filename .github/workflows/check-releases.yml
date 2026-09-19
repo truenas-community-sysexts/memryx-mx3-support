@@ -486,10 +486,11 @@ jobs:
       #   - preview: built when the TrueNAS beta or the SDK moved.
       # So an SDK bump produces BOTH a 25.x and a 26-beta build ("each release
       # has both"); a TrueNAS-only bump on one channel builds only that channel.
-      # mark_latest='false' on both keeps unverified auto-builds out of
-      # /releases/latest; preview builds additionally never promote (build.yml
-      # gives them the preview-hardware-test label and promote.yml refuses
-      # beta/RC tags).
+      # Every build publishes as a prerelease and installs nowhere until a
+      # hardware test on its train signs it off (build.yml no longer takes a
+      # mark_latest override); preview builds additionally stay prereleases
+      # forever (build.yml gives them the preview-hardware-test label and
+      # promote.yml only records their train).
       # -----------------------------------------------------------------------
       - name: Trigger stable build
         if: steps.truenas.outputs.changed == 'true' || steps.memryx.outputs.changed == 'true'
@@ -509,8 +510,7 @@ jobs:
                 driver_repo:     '${{ steps.write.outputs.driver_repo }}',
                 apt_channel:     '${{ steps.write.outputs.apt_channel }}',
                 train_name:      '${{ steps.write.outputs.train }}',
-                runner:          '${{ steps.runner.outputs.runner }}',
-                mark_latest:     'false'
+                runner:          '${{ steps.runner.outputs.runner }}'
               }
             });
             console.log('Dispatched stable build.yml: TrueNAS ${{ steps.write.outputs.truenas_version }} (${{ steps.write.outputs.train }}), MemryX SDK ${{ steps.write.outputs.memryx_sdk }} (driver ${{ steps.write.outputs.driver_ref }}), runner ${{ steps.runner.outputs.runner }}');
@@ -534,8 +534,7 @@ jobs:
                 apt_channel:     '${{ steps.write.outputs.apt_channel }}',
                 train_name:      '${{ steps.write.outputs.preview_train }}',
                 runner:          '${{ steps.write.outputs.preview_runner }}',
-                iso_url:         '${{ steps.write.outputs.preview_iso_url }}',
-                mark_latest:     'false'
+                iso_url:         '${{ steps.write.outputs.preview_iso_url }}'
               }
             });
             console.log('Dispatched preview build.yml: TrueNAS ${{ steps.write.outputs.preview_version }} (${{ steps.write.outputs.preview_train }}), MemryX SDK ${{ steps.write.outputs.memryx_sdk }} (driver ${{ steps.write.outputs.driver_ref }}), runner ${{ steps.write.outputs.preview_runner }}, iso_url ${{ steps.write.outputs.preview_iso_url }}');

@@ -17,6 +17,10 @@ GEMINI.md
 # macOS
 .DS_Store
 
+# Python bytecode from the test suite
+__pycache__/
+*.pyc
+
 # Editors
 .vscode/
 .idea/

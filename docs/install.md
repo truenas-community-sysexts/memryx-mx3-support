@@ -1,7 +1,7 @@
 # Install Reference
 
-How `install.sh` works, its options, and what ends up on disk. For the quick
-path, see the [README](../README.md#quick-start).
+How `get.sh` and `install.sh` work, their options, and what ends up on disk.
+For the quick path, see the [README](../README.md#quick-start).
 
 ## Release artifacts
 
@@ -14,29 +14,78 @@ Each release ships:
 Release tags encode the versions: `v<truenas>-memryx<sdk>-r<run>` (e.g.
 `v25.10.4-memryx2.1-r12`).
 
+## Which release gets installed
+
+`get.sh` (on `main`, so it changes only through a reviewed PR) does the
+picking, and `install.sh` applies the same rule when it is run on its own:
+
+1. Read the TrueNAS version (`midclt call system.info`) and derive the
+   **train**: the major version from 26 on (every 26.x release, betas
+   included, is train 26), `major.minor` before that (`25.10`, `25.04`).
+2. List every release and keep the **approved** ones. A release is approved
+   for a train when its notes carry `<!-- verified-train: <train> -->`, which
+   `promote.yml` writes when that train's hardware-test issue closes as
+   completed; a full (non-prerelease) release with no marker at all was
+   promoted before per-train sign-off and counts for every train.
+3. Of those, take the newest built for this box's exact TrueNAS version
+   (releases are tagged `v<truenas>-...`).
+
+There is no fallback to an unverified build, on stable or on preview boxes.
+With nothing approved, `get.sh` stops, lists the builds waiting for a
+hardware test, and links the open hardware-test issues.
+
+**Script-only modes** (`--check`, `--help`, `--uninstall`, or passing your own
+`memryx.raw`) run a release's scripts without installing its image, so they
+accept the newest approved release built for this box's **own train** when
+this TrueNAS version has none. They never take a release built for another
+train, grandfathered or not: another train's `--check` inspects a different
+install layout and its `restore.sh` runs a different removal flow. Pin one
+with `--release=TAG` to use it anyway.
+
 ## Install
 
-Auto-detect TrueNAS version, download the matching (non-prerelease) build, install:
+Detect the TrueNAS version and train, download the approved build, verify the
+checksum, and run that release's installer:
 
 ```bash
-curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash
 ```
 
-Install a specific local image (e.g. a prerelease under hardware test):
+Install one exact release (for example a prerelease under hardware test),
+skipping the selection:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash -s -- --release=<tag>
+```
+
+Install a specific local image:
 
 ```bash
 curl -fSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/download/<tag>/memryx.raw -o /tmp/memryx.raw
 curl -fSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/download/<tag>/install.sh | sudo bash -s -- /tmp/memryx.raw
 ```
 
-## Options
+## get.sh options
+
+Everything after `bash -s --` goes to the release's `install.sh`, except the
+three flags `get.sh` reads itself:
+
+| Option | Effect |
+| --- | --- |
+| `--release=TAG` | Use that release, with no selection |
+| `--repo=OWNER/NAME` | Point the selection and downloads at a fork (or `MEMRYX_REPO`) |
+| `--uninstall` | Run the approved release's `uninstall.sh` instead of `install.sh` |
+
+## install.sh options
 
 | Option | Effect |
 | --- | --- |
 | `--pool=NAME` | ZFS pool for persistent config (`/mnt/NAME/.config/memryx`) |
 | `--persist-path=PATH` | Exact persist dir; must be `/mnt/<pool>/.config/memryx` |
 | `--repo=OWNER/NAME` | Download releases from a fork (or `MEMRYX_REPO` env var) |
+| `--release=TAG` | Install that release (no selection); with a local image, record it as that release's image |
 | `--check` | Read-only probe of an existing install; exits 1 on any failure |
+| `--update-firmware` | Flash the bundled MX3 firmware (bare metal only) |
 | `--dry-run` | Validate downloads/checksums/network without modifying the system |
 | `--help` | Usage |
 
@@ -77,8 +126,14 @@ and the PREINIT boot result. Each failure includes a one-line hint.
 ## Uninstall
 
 ```bash
-curl -fsSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/latest/download/uninstall.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash -s -- --uninstall
 ```
+
+`get.sh --uninstall` downloads `uninstall.sh`, `restore.sh` and
+`memryx-lib.sh` from the approved release and runs them together. Run
+straight from a release, `uninstall.sh` and `restore.sh` apply the same
+selection themselves for whatever they still have to fetch, and both take
+`--release=TAG`.
 
 `uninstall.sh` is a thin alias for `restore.sh`, which: stops `mxa-manager`,
 unloads `memx_cascade_plus_pcie` (refusing if it's in use unless `--force`),

@@ -1148,6 +1148,8 @@ jobs:
                 `acclBench -H                           # device info for 4 chips (needs Frigate stopped)`,
                 "```",
                 ``,
+                "Upgrading over an earlier build for a different kernel (for example after a TrueNAS update): `--check` here also shows 1 fail, `PREINIT logged an error this boot` with a `Kernel version mismatch` message. That entry was written by the boot before this install and clears after the reboot in step 4, where 0 fail is required.",
+                ``,
                 `### 4. Reboot and re-verify`,
                 "```bash",
                 `sudo reboot`,

@@ -1,0 +1,42 @@
+kdriver: PCIe device node mode is hex 0x0666, meant octal 0666
+
+Re-applied at build time to the pinned mx3_driver_pub tag (v2.1.0; still present on
+v2.2.0 and the release branch). kdriver/linux/pcie/memx_pcie.h defines
+DEVICE_NODE_DEFAULT_ACCESS_RIGHT as (0x0666), which memx_pcie_devnode() hands to
+the kernel as the node mode. 0x0666 is 0o3146, so /dev/memx0 and
+/dev/memx0_feature are created as c--xr-SrwT (setgid + sticky, owner exec only)
+instead of crw-rw-rw-. The USB header already uses the octal (0666). The sysext
+udev rule (MODE="0666") does not correct it, confirmed on TrueNAS 26.0.0-BETA.3
+hardware before and after a reboot. Privileged Frigate is unaffected (root), but
+anything relying on the documented 0666 is not.
+
+No functional change beyond the node mode; no driver version change. Fixed in both
+the kdriver/ and 32bit_driver/ copies. The applier skips this once it lands in the
+pinned tag.
+
+diff --git a/32bit_driver/kdriver/linux/pcie/memx_pcie.h b/32bit_driver/kdriver/linux/pcie/memx_pcie.h
+index 9a8c2a3..8c71a12 100644
+--- a/32bit_driver/kdriver/linux/pcie/memx_pcie.h
++++ b/32bit_driver/kdriver/linux/pcie/memx_pcie.h
+@@ -17,7 +17,7 @@
+ #define PCIE_NAME "memx_pcie_ai_chip"
+ 
+ #define DEVICE_NODE_NAME "memx%d"
+-#define DEVICE_NODE_DEFAULT_ACCESS_RIGHT (0x0666)
++#define DEVICE_NODE_DEFAULT_ACCESS_RIGHT (0666)
+ #define DEVICE_CLASS_NAME "memx_cdev"
+ 
+ #define MEMX_PCIE_VENDOR_ID (0x1FE9)
+diff --git a/kdriver/linux/pcie/memx_pcie.h b/kdriver/linux/pcie/memx_pcie.h
+index 8920272..c6abcab 100644
+--- a/kdriver/linux/pcie/memx_pcie.h
++++ b/kdriver/linux/pcie/memx_pcie.h
+@@ -17,7 +17,7 @@
+ #define PCIE_NAME "memx_pcie_ai_chip"
+ 
+ #define DEVICE_NODE_NAME "memx%d"
+-#define DEVICE_NODE_DEFAULT_ACCESS_RIGHT (0x0666)
++#define DEVICE_NODE_DEFAULT_ACCESS_RIGHT (0666)
+ #define DEVICE_CLASS_NAME "memx_cdev"
+ 
+ #define MEMX_PCIE_VENDOR_ID (0x1FE9)

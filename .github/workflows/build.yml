@@ -217,6 +217,9 @@ jobs:
     outputs:
       run_number: ${{ steps.build_id.outputs.run_number }}
       memryx_pkg_version: ${{ steps.userspace.outputs.memryx_pkg_version }}
+      # Exact kernel the module targets; the hardware-test issue tells the
+      # tester to confirm `uname -r` matches it before installing.
+      real_kver: ${{ steps.kver.outputs.real_kver }}
 
     steps:
       - name: Checkout repository
@@ -448,6 +451,7 @@ jobs:
           key: kernel-headers-v3-${{ needs.resolve.outputs.truenas_version }}
 
       - name: Detect kernel version from cached headers
+        id: kver
         run: |
           # shellcheck disable=SC2010 # ls|grep is fine: TrueNAS package-controlled filenames
           KVER=$(ls /tmp/kernel-headers/ | grep 'linux-headers-' | sed 's/linux-headers-//' | grep -i 'production' | head -1 || true)
@@ -473,6 +477,7 @@ jobs:
           fi
           echo "Real kernel version: ${REAL_KVER}"
           echo "REAL_KVER=${REAL_KVER}" >> "$GITHUB_ENV"
+          echo "real_kver=${REAL_KVER}" >> "$GITHUB_OUTPUT"
 
           # Detect the GCC major version the kernel was compiled with.
           HEADER_DIR="/tmp/kernel-headers/linux-headers-${KVER}"
@@ -913,8 +918,9 @@ jobs:
           and to `/dev/memx0`.
 
           > **Requirements (read these):** the card's firmware must be at
-          > anti-rollback **cnt ≥ 6** (run `sudo ./install.sh --update-firmware` on
-          > **bare metal** — it can't be flashed from inside a passthrough VM), and
+          > anti-rollback **cnt ≥ 6** (flash it on **bare metal** with
+          > `curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash -s -- --update-firmware`;
+          > it can't be flashed from inside a passthrough VM), and
           > Frigate must run as a **privileged** container with `device: PCIe:0`.
           > See the [README](https://github.com/${REPO}#using-with-frigate).
 
@@ -936,7 +942,7 @@ jobs:
 
           ### Verify
           ```bash
-          sudo ./install.sh --check                 # includes a firmware anti-rollback check
+          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash -s -- --check
           ls /dev/memx0 && systemctl status mxa-manager
           ```
 
@@ -1021,6 +1027,7 @@ jobs:
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
           MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
           RUN_NUMBER: ${{ needs.build.outputs.run_number }}
+          REAL_KVER: ${{ needs.build.outputs.real_kver }}
         with:
           script: |
             const tag = `v${process.env.TRUENAS_VERSION}-memryx${process.env.MEMRYX_SDK}-r${process.env.RUN_NUMBER}`;
@@ -1071,16 +1078,24 @@ jobs:
               return;
             }
 
-            const promoteSection = isPreview
+            // Test instructions. Every command must work exactly as written on
+            // a TrueNAS box: a human validator pastes them. The scripts are
+            // downloaded to /var/tmp (survives the step 4 reboot, unlike /tmp)
+            // so `install.sh --check` can be re-run from there after reboot.
+            const tv = process.env.TRUENAS_VERSION;
+            const sdk = process.env.MEMRYX_SDK;
+            const kver = process.env.REAL_KVER || 'unknown (see the Target kernel row in the release notes)';
+            const base = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`;
+            const dir = '/var/tmp/memryx-test';
+
+            const signOff = isPreview
               ? [
-                  `### Promote`,
-                  `This is a **TrueNAS ${process.env.TRUENAS_VERSION} preview build**. It is intentionally kept as a permanent **pre-release** and is **never** promoted to Latest, so stable installs are unaffected.`,
-                  `Once you've verified it on hardware, **close this issue as completed** to record the sign-off. The release stays a pre-release; install it explicitly via its tag.`,
+                  `- Works: close this issue as **completed** to record the sign-off. This TrueNAS ${tv} preview build stays a pre-release and is **never** promoted to Latest.`,
+                  `- Broken: comment what failed, then close as **not planned**.`,
                 ]
               : [
-                  `### Promote`,
-                  `This build is published as a **pre-release**, so it is not served by \`releases/latest\` (or install.sh) yet.`,
-                  `Once you've verified it on hardware, **close this issue as completed** — that automatically promotes [\`${tag}\`](${releaseUrl}) to the latest release and appends the changelog.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release marked Latest, so the default install.sh serves it on TrueNAS ${tv}, and appends the changelog.`,
+                  `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release.`,
                 ];
 
             await github.rest.issues.create({
@@ -1095,28 +1110,63 @@ jobs:
                 ``,
                 `**Release:** [${tag}](${releaseUrl})`,
                 `<!-- release-tag: ${tag} -->`,
-                `**TrueNAS:** ${process.env.TRUENAS_VERSION}`,
-                `**MemryX SDK:** ${process.env.MEMRYX_SDK}`,
+                `**TrueNAS:** ${tv}`,
+                `**MemryX SDK:** ${sdk}`,
+                `**Target kernel:** \`${kver}\``,
                 ``,
-                `### Install THIS build to test it`,
-                `It is a **pre-release**, so the default \`latest\` install (and version auto-resolve) skip it. Download this exact build's scripts alongside the image and run from that directory (a pre-release has no \`latest\` asset for the piped form to fetch the shared lib from):`,
+                `### Requirements`,
+                `- TrueNAS ${tv} running kernel \`${kver}\`, with a MemryX MX3 M.2 card (bare metal, or a VM with the card passed through).`,
+                `- The module is built for that exact kernel. install.sh does not check it: on any other kernel it installs anyway, the module never loads and \`--check\` fails. Stop at step 1 if \`uname -r\` does not match.`,
+                `- Card firmware at anti-rollback cnt >= 6. If \`acclBench -H\` in step 3 reports a nonsense chip count, run \`sudo bash install.sh --update-firmware\` from \`${dir}\` (bare metal only), power the host fully off and on, then retest.`,
+                `- Optional detector test: Frigate running privileged with \`/dev/memx0\`, \`/run/mxa_manager\` and detector \`device: PCIe:0\`.`,
+                ``,
+                `### 1. Pre-checks`,
                 "```bash",
-                `BASE=https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`,
-                `mkdir -p /tmp/memryx-test && cd /tmp/memryx-test`,
-                `curl -fsSL "$BASE/memryx.raw"      -o memryx.raw`,
-                `curl -fsSL "$BASE/install.sh"      -o install.sh`,
-                `curl -fsSL "$BASE/memryx-lib.sh"   -o memryx-lib.sh`,
-                `sudo bash install.sh memryx.raw`,
+                `uname -r                               # must print ${kver}`,
+                `lspci -d 1fe9:                         # must list the MX3 (MemryX vendor ID 1fe9)`,
+                `sudo midclt call -j app.stop frigate   # Frigate holds /dev/memx0 open; use your app name, skip if none`,
                 "```",
                 ``,
-                `### Test checklist`,
-                `- [ ] Download and install on a TrueNAS system with a MemryX MX3 M.2 card`,
-                `- [ ] Confirm \`/dev/memx0\` exists after module load`,
-                `- [ ] Confirm \`systemctl status mxa-manager\` is active and \`/run/mxa_manager\` exists`,
-                `- [ ] Confirm Frigate's \`memryx\` detector initialises (SDK ${process.env.MEMRYX_SDK})`,
-                `- [ ] Reboot and confirm the PREINIT script restores the sysext + daemon`,
+                `### 2. Install this build`,
+                isPreview
+                  ? `Install this exact build from its tag (the default install picks the newest build for your TrueNAS version, which may be a different one):`
+                  : `It is a pre-release, so the default install skips it. Install it from its tag:`,
+                "```bash",
+                `BASE=${base}`,
+                `mkdir -p ${dir} && cd ${dir}`,
+                `for f in memryx.raw memryx.raw.sha256 install.sh memryx-lib.sh; do curl -fsSLO "$BASE/$f"; done`,
+                `sha256sum -c memryx.raw.sha256         # memryx.raw: OK`,
+                `sudo bash install.sh memryx.raw        # add --pool=NAME if it asks; ends with "Stack is up."`,
+                "```",
                 ``,
-                ...promoteSection,
+                `### 3. Verify`,
+                "```bash",
+                `cd ${dir}`,
+                `sudo bash install.sh --check           # Summary: ... 0 fail (the PREINIT line only warns until step 4)`,
+                `ls -l /dev/memx0                       # crw-rw-rw- ... /dev/memx0`,
+                `systemctl is-active mxa-manager        # active`,
+                `acclBench -H                           # device info for 4 chips (needs Frigate stopped)`,
+                "```",
+                ``,
+                `### 4. Reboot and re-verify`,
+                "```bash",
+                `sudo reboot`,
+                "```",
+                `After it is back up (Frigate stays stopped until you start it):`,
+                "```bash",
+                `cd ${dir}`,
+                `uname -r                               # still ${kver}`,
+                `sudo bash install.sh --check           # "PREINIT completed successfully this boot", 0 fail`,
+                `systemctl is-active mxa-manager        # active`,
+                `acclBench -H                           # 4 chips again`,
+                `sudo midclt call -j app.start frigate  # optional: Frigate System metrics then show the memryx detector with an inference speed`,
+                "```",
+                ``,
+                `### 5. Report and sign off`,
+                `Comment with \`uname -r\`, bare metal or VM, the step 4 output of \`sudo bash install.sh --check\` and \`acclBench -H\`, and whether the Frigate detector ran.`,
+                ...signOff,
+                ``,
+                `Afterwards: \`rm -rf ${dir}\``,
               ].join('\n'),
             });
             console.log(`Created ${label} issue for ${tag}`);

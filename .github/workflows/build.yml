@@ -39,14 +39,6 @@ on:
         description: 'Full ISO URL override for non-standard channels (e.g. TrueNAS 26 beta on iso.sys.truenas.net, which has no GITMANIFEST). When set, skips download.truenas.com URL construction; requires an explicit runner. Leave blank for normal builds.'
         required: false
         default: ''
-      mark_latest:
-        description: 'true = publish straight to Latest; false (default) = prerelease + hardware-test gate'
-        required: false
-        type: choice
-        options:
-          - 'true'
-          - 'false'
-        default: 'false'
 
   workflow_call:
     inputs:
@@ -79,10 +71,6 @@ on:
         type: string
         required: false
         default: ''
-      mark_latest:
-        type: string
-        required: false
-        default: 'false'
 
 permissions:
   contents: write
@@ -109,8 +97,6 @@ jobs:
       train_name: ${{ steps.params.outputs.train_name }}
       runner: ${{ steps.params.outputs.runner }}
       iso_url: ${{ steps.params.outputs.iso_url }}
-      mark_latest: ${{ steps.params.outputs.mark_latest }}
-      prerelease: ${{ steps.params.outputs.prerelease }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -132,7 +118,6 @@ jobs:
           INPUT_TRAIN_NAME: ${{ inputs.train_name }}
           INPUT_RUNNER: ${{ inputs.runner }}
           INPUT_ISO_URL: ${{ inputs.iso_url }}
-          INPUT_MARK_LATEST: ${{ inputs.mark_latest }}
         run: |
           set -euo pipefail
 
@@ -164,12 +149,6 @@ jobs:
           REPO="${INPUT_DRIVER_REPO:-$TRACKED_REPO}"
           CHANNEL="${INPUT_APT_CHANNEL:-$TRACKED_CHANNEL}"
           RUNNER="${INPUT_RUNNER}"
-          MARK_LATEST="${INPUT_MARK_LATEST:-true}"
-          # Unverified auto-builds (mark_latest=false) are published as a
-          # PRERELEASE so GitHub keeps them out of /releases/latest (and thus
-          # install.sh) until a human promotes them. make_latest=false alone
-          # does NOT hold this gate with action-gh-release@v3.
-          if [ "$MARK_LATEST" = "true" ]; then PRERELEASE="false"; else PRERELEASE="true"; fi
 
           if [ -z "$RUNNER" ]; then
             if [ -n "$INPUT_ISO_URL" ]; then
@@ -193,8 +172,6 @@ jobs:
             echo "train_name=${TRAIN}"
             echo "runner=${RUNNER}"
             echo "iso_url=${INPUT_ISO_URL}"
-            echo "mark_latest=${MARK_LATEST}"
-            echo "prerelease=${PRERELEASE}"
           } >> "$GITHUB_OUTPUT"
 
           echo "Resolved build parameters:"
@@ -207,8 +184,6 @@ jobs:
           echo "  train_name=${TRAIN}"
           echo "  runner=${RUNNER}"
           echo "  iso_url=${INPUT_ISO_URL:-(none)}"
-          echo "  mark_latest=${MARK_LATEST}"
-          echo "  prerelease=${PRERELEASE}"
 
   build:
     needs: resolve
@@ -937,18 +912,19 @@ jobs:
 
           ### Install
           ```bash
-          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash
+          curl -fsSL https://raw.githubusercontent.com/${REPO}/main/get.sh | sudo bash
           ```
+          `get.sh` installs the newest build approved for your TrueNAS train and built for your TrueNAS version. This build qualifies once its hardware test signs it off for the train it was built for.
 
           ### Verify
           ```bash
-          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash -s -- --check
+          curl -fsSL https://raw.githubusercontent.com/${REPO}/main/get.sh | sudo bash -s -- --check
           ls /dev/memx0 && systemctl status mxa-manager
           ```
 
           ### Uninstall
           ```bash
-          curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/uninstall.sh | sudo bash
+          curl -fsSL https://raw.githubusercontent.com/${REPO}/main/get.sh | sudo bash -s -- --uninstall
           ```
 
           ### Checksums
@@ -1007,21 +983,21 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Publish the draft (prerelease gate, or Latest on override)
+      - name: Publish the draft as a prerelease (hardware-test gate)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REL_ID: ${{ steps.release.outputs.id }}
-          MARK_LATEST: ${{ needs.resolve.outputs.mark_latest }}
         run: |
-          if [ "$MARK_LATEST" = "true" ]; then
-            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -f make_latest=true
-          else
-            gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
-          fi
+          # Every build publishes as a PRERELEASE, stable and preview alike,
+          # and there is no way to publish one straight to Latest: a full
+          # release with no verified-train marker counts as approved for
+          # every train (the grandfather rule for builds promoted before
+          # per-train sign-off), so it would reach every box untested. Only
+          # promote.yml, on a closed hardware-test issue, approves a build.
+          gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
 
       - name: Create hardware-test issue for auto-build
-        if: needs.resolve.outputs.mark_latest == 'false'
         uses: actions/github-script@v9
         env:
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
@@ -1094,11 +1070,11 @@ jobs:
 
             const signOff = isPreview
               ? [
-                  `- Works: close this issue as **completed** to record the sign-off. This TrueNAS ${tv} preview build stays a pre-release and is **never** promoted to Latest.`,
+                  `- Works: close this issue as **completed** to record the sign-off. That approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}. This preview build stays a pre-release and is **never** promoted to Latest.`,
                   `- Broken: comment what failed, then close as **not planned**.`,
                 ]
               : [
-                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release marked Latest, so the default install.sh serves it on TrueNAS ${tv}, and appends the changelog.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release marked Latest, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog.`,
                   `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release.`,
                 ];
 
@@ -1114,6 +1090,7 @@ jobs:
                 ``,
                 `**Release:** [${tag}](${releaseUrl})`,
                 `<!-- release-tag: ${tag} -->`,
+                `<!-- preview-build: ${isPreview} -->`,
                 `**TrueNAS:** ${tv}`,
                 `**MemryX SDK:** ${sdk}`,
                 `**Target kernel:** \`${kver}\``,

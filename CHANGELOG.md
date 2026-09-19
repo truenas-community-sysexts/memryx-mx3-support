@@ -4,6 +4,62 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Per-train approval, and a `get.sh` bootstrap.** A hardware test now approves
+  a build for the TrueNAS train it was built for, and nothing unapproved is ever
+  installed.
+  - `get.sh` on `main` is the new entry point (`.../main/get.sh`, see the
+    README). It detects the TrueNAS version and train, picks the newest
+    approved release built for that version, downloads that release's
+    `install.sh`, `memryx-lib.sh`, `memryx.raw` and `memryx.raw.sha256`,
+    verifies the image, and runs that release's installer with the local image.
+    `--uninstall` runs the same release's `uninstall.sh`/`restore.sh`, and
+    `--release=TAG` pins one. The old
+    `releases/latest/download/install.sh` one-liner still works, but it runs
+    whatever installer Latest carries.
+  - **Approved** means the release notes carry `<!-- verified-train: <train> -->`
+    for the box's train, or the release is a full (non-prerelease) release with
+    no marker at all (promoted before per-train sign-off, grandfathered for
+    every train). The train is the major version from 26 on (every 26.x
+    release, betas included, is train 26) and `major.minor` before that. There
+    is no fallback to an unverified build, on stable or preview boxes: a beta
+    box no longer installs an unverified beta build straight away.
+  - The selection is one shared block, carried verbatim by `get.sh`,
+    `scripts/install.sh`, `scripts/uninstall.sh` and `scripts/restore.sh` (each
+    a self-contained `curl | bash` script); `tests/test_release_selection.py`
+    fails CI when the copies drift. The exact-TrueNAS-version match that picks a
+    release is unchanged; approval is one extra filter on top of it.
+  - Script-only modes (`--check`, `--help`, `--uninstall`, a user-supplied
+    image) load no module from the release, so they fall back to the newest
+    approved release built for the box's **own train**, never one built for
+    another train. With none, they fail with the waiting hardware-test issue
+    named and `--release=TAG` offered.
+  - `promote.yml` handles `hardware-test` and `preview-hardware-test` issues
+    closed as completed: it appends the `verified-train` marker, taking the
+    train from the TrueNAS version in the release notes header. A stable
+    sign-off still promotes (prerelease cleared, Latest when it is the newest
+    stable version, changelog appended) in the same update; a preview sign-off
+    adds the marker only and the build stays a prerelease. Issues opened before
+    per-train approval keep working.
+  - `install.sh` gained `--release=TAG`, and no longer fetches `memryx-lib.sh`
+    from `releases/latest`: it uses the sibling file, the copy bundled in a
+    local `.raw`, or the chosen release. `uninstall.sh` and `restore.sh` do the
+    same for `restore.sh` and `memryx-lib.sh`, and both take `--release=TAG`.
+  - `tests/` (run by a new `lint.yml` job) covers the approval filter, the
+    script-only fallback, the no-candidate message, train-key parsing,
+    `promote.yml`'s marker logic and end-to-end `get.sh` runs against stubbed
+    `curl`/`midclt`.
+
+### Removed
+
+- **`build.yml`'s `mark_latest` input**, and the `mark_latest: 'false'` it was
+  handed by `check-releases.yml`. It published straight to Latest as a full
+  release with no `verified-train` marker, which the grandfather rule would
+  then treat as approved on every train, untested. Every build now publishes as
+  a prerelease and opens its hardware-test issue; only `promote.yml` approves
+  one.
+
 Initial implementation of the MemryX MX3 sysext for TrueNAS SCALE, adapted from
 the sibling [coral-pcie-support](https://github.com/truenas-community-sysexts/coral-pcie-support)
 and [hailo8-support](https://github.com/truenas-community-sysexts/hailo8-support)

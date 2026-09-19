@@ -44,7 +44,8 @@ The DKMS module *source* shipped inside `memx-drivers` is ignored — we build t
 ## Version tracking ([`check-releases.yml`](../.github/workflows/check-releases.yml))
 
 Daily cron + manual dispatch. Three independent checks; any firing triggers build
-dispatches with `mark_latest=false` (prerelease gate). A **MemryX SDK bump builds
+dispatches. Every build publishes as a prerelease and installs nowhere until a
+hardware test on its train signs it off. A **MemryX SDK bump builds
 both** the stable (25.x) and preview (26-beta) targets so each driver release ships
 both; a TrueNAS-only bump on one channel builds just that channel.
 
@@ -96,12 +97,22 @@ in `lint.yml`.
 - **Tag:** `v<truenas>-memryx<sdk>-r<run_number>` (e.g. `v25.10.4-memryx2.1-r12`).
   The `-r<run>` suffix is monotonic per workflow, so every dispatch gets a unique
   tag even on same-commit retries (GitHub immutable-release tag-burn).
-- Auto-builds publish as a **prerelease** and open a `hardware-test` issue. They
-  are not served by `releases/latest` (or `install.sh`) until a human verifies on
-  hardware and closes the issue as completed — [`promote.yml`](../.github/workflows/promote.yml)
-  then flips it to Latest and appends a changelog.
-- `mark_latest=true` (manual dispatch) skips the gate and publishes straight to
-  Latest.
+- **Every** build publishes as a **prerelease** and opens one hardware-test
+  issue: `hardware-test` for a stable target, `preview-hardware-test` for a
+  TrueNAS beta/RC one. There is no override that publishes straight to Latest:
+  a full release with no `verified-train` marker counts as approved for every
+  train (the grandfather rule), so it would reach every box untested.
+- Closing that issue as **completed** runs
+  [`promote.yml`](../.github/workflows/promote.yml), which appends
+  `<!-- verified-train: <train> -->` to the release notes. The train comes from
+  the TrueNAS version in the notes header: the major from 26 on, `major.minor`
+  before that. A stable build is promoted in the same update (prerelease flag
+  cleared, Latest when it is the newest stable version, changelog appended); a
+  preview build gets the marker only and stays a prerelease forever.
+- `get.sh` and `install.sh` install a build on a train only when its notes
+  carry that train's marker, or when it is a full release with no marker at
+  all. Nothing else is ever installed, on stable or preview boxes. GitHub's
+  "Latest" flag is cosmetic; nothing selects by it.
 
 ## Verification status
 

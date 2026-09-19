@@ -1,14 +1,32 @@
 name: Promote release on hardware-test sign-off
 
-# When a `hardware-test` issue is closed as completed, promote the prerelease
-# it gates: flip it from prerelease to a full release marked "Latest", and
-# append a changelog (GitHub's PR-based auto-notes + a commit list, since most
-# changes here land as direct pushes that PR-notes miss). The release tag is
-# read from a `<!-- release-tag: vX -->` marker the build writes into the issue
-# body, so this is independent of issue-title formatting.
+# A hardware test approves a build for the TrueNAS train it was built for.
+# build.yml opens one issue per build: `hardware-test` for a stable target,
+# `preview-hardware-test` for a TrueNAS preview (beta/RC) one. The release
+# tag is read from a `<!-- release-tag: X -->` marker the build writes into
+# the issue body, so this is independent of issue-title formatting. When
+# either is closed as completed:
+#   - `<!-- verified-train: KEY -->` is appended to the release notes, once.
+#     KEY is the train of the TrueNAS version in the notes header ("for
+#     TrueNAS SCALE <version>"): the major from 26 on, major.minor before
+#     that. get.sh and install.sh install a build on a train only when its
+#     notes carry that train's marker, or when it is a full release with no
+#     marker at all (promoted before per-train sign-off, approved for every
+#     train);
+#   - a stable build is also promoted as before: the prerelease becomes a
+#     full release, is marked "Latest" when it is the newest stable version,
+#     and gets a changelog (GitHub's PR-based auto-notes + a commit list,
+#     since most changes here land as direct pushes that PR-notes miss).
+#     Marker, flip and changelog go in ONE update: a full release without
+#     the marker would count as approved for every train, even for a moment;
+#   - a preview build only gets the marker: it stays a prerelease and is
+#     never promoted to Latest.
+# Issues opened before per-train approval carry the same release-tag marker
+# and take the same path; the train comes from the release notes, not the
+# issue. Closed as "not planned": no change.
 #
 # Editing a release does not touch the protected branch, so the default
-# GITHUB_TOKEN (contents: write) is sufficient — no app token needed.
+# GITHUB_TOKEN (contents: write) is sufficient; no app token needed.
 
 on:
   issues:
@@ -22,16 +40,84 @@ jobs:
   promote:
     # Only hardware-test issues closed as "completed" (not "not planned").
     if: >-
-      contains(github.event.issue.labels.*.name, 'hardware-test') &&
+      (contains(github.event.issue.labels.*.name, 'hardware-test') ||
+       contains(github.event.issue.labels.*.name, 'preview-hardware-test')) &&
       github.event.issue.state_reason == 'completed'
     runs-on: ubuntu-latest
     steps:
-      - name: Promote the prerelease this issue gates
+      - name: Record the sign-off on the release this issue gates
         uses: actions/github-script@v9
         with:
           script: |
             const issue = context.payload.issue;
             const { owner, repo } = context.repo;
+
+            // Pure helpers, defined up front so the guards below can use
+            // them. tests/test_promote.py extracts everything between the
+            // sentinels verbatim and runs it under node, and runs this whole
+            // script under node with a stub GitHub client.
+            // BEGIN promote-helpers
+            // Canonical preview rule (keep in sync with install.sh's
+            // preview_release): preview iff the string contains -BETA or -RC
+            // as a substring, case-insensitive. No \b anchor: a dotless
+            // 26.0.0-RC1 must still classify as preview, matching the
+            // installer.
+            const previewVer = (s) => /-(?:BETA|RC)/i.test(s || '');
+            // The notes header build.yml always renders ("for TrueNAS SCALE
+            // <version>") names the target the build was made for.
+            const bodyVerOf = (r) => (((r.body || '').match(/for TrueNAS SCALE (\S+)/) || [])[1] || '');
+            const previewRelease = (r) => previewVer(r.tag_name) || previewVer(bodyVerOf(r));
+
+            // Per-train approval. The trains a release is approved for: one
+            // verified-train line each (the pattern install.sh's selection
+            // matches).
+            const verifiedTrains = (r) => new Set(
+              [...(r.body || '').matchAll(/^[ \t]*<!--\s*verified-train:\s*([^\s>]+?)\s*-->/gm)].map((x) => x[1]));
+            // Train key of a TrueNAS version, the rule install.sh's
+            // truenas_train_key applies: the major from 26 on (26.0.0-BETA.3
+            // is 26), major.minor before that (25.10.7 is 25.10). '' when
+            // there is none.
+            const trainKey = (v) => {
+              const m = /^(\d+)(?:$|\.(\d*))/.exec(v || '');
+              if (!m) return '';
+              if (Number(m[1]) >= 26) return m[1];
+              return m[2] ? `${m[1]}.${m[2]}` : '';
+            };
+
+            // Only become the "Latest" release if this is the newest STABLE
+            // (non-pre-release) version. Promoting an OLDER build must not
+            // regress Latest to an older version; it still flips to a full
+            // (verified) release, but Latest stays on the newer one.
+            // (GitHub's make_latest:'legacy' picks by date, which would
+            // wrongly favour the just-promoted older build, so compare
+            // versions explicitly.) Stable tags are vX.Y[.Z...]-<driver>...
+            // with no '-' inside the version.
+            const tagVer = (t) => {
+              const m = (t || '').match(/^v(\d+(?:\.\d+)*)-/);
+              return m ? m[1].split('.').map(Number) : null;
+            };
+            const cmpVer = (a, b) => {
+              const n = Math.max(a.length, b.length);
+              for (let i = 0; i < n; i++) { const d = (a[i] || 0) - (b[i] || 0); if (d) return d; }
+              return 0;
+            };
+            const decideMakeLatest = (rel, others) => {
+              const thisVer = tagVer(rel.tag_name);
+              let newest = thisVer;  // rel is becoming non-pre-release
+              for (const r of others) {
+                // Betas / unverified builds can't be Latest. The prerelease
+                // flag alone is not trusted here: a beta mispublished as a
+                // full release would outrank every stable version (tagVer
+                // reads 26.0.0 out of v26.0.0-BETA.3-...) and wedge
+                // makeLatest=false for all later stable promotions.
+                if (r.prerelease || previewRelease(r)) continue;
+                const v = tagVer(r.tag_name);
+                if (v && (!newest || cmpVer(v, newest) > 0)) newest = v;
+              }
+              const makeLatest = (thisVer && newest && cmpVer(thisVer, newest) >= 0) ? 'true' : 'false';
+              return { makeLatest, newest };
+            };
+            // END promote-helpers
 
             const m = (issue.body || '').match(/<!--\s*release-tag:\s*(\S+?)\s*-->/);
             if (!m) {
@@ -39,18 +125,16 @@ jobs:
               return;
             }
             const tag = m[1];
+            const labels = (issue.labels || []).map((l) => (typeof l === 'string' ? l : l.name));
 
-            // Safety gate: never promote a TrueNAS preview (beta/RC) build to
-            // Latest — that would route stable installs to a beta via
-            // install.sh. Preview builds use the `preview-hardware-test` label
-            // (which this workflow's `if:` already excludes), but guard on the
-            // tag too in case an issue was mislabeled.
-            if (/-(?:BETA|RC)\b/i.test(tag)) {
-              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-                body: `ℹ️ \`${tag}\` is a TrueNAS preview (beta/RC) build. Preview builds stay pre-releases and are never promoted to Latest, so no change was made.` });
-              core.info(`Skipping promotion of preview tag ${tag}.`);
-              return;
-            }
+            // A preview (beta/RC) sign-off approves the build for its train
+            // but never promotes it: promoting would route stable installs to
+            // a beta. Any one signal is enough: the label, the preview-build
+            // marker build.yml writes next to release-tag, the tag, or
+            // (below, once the release is fetched) the notes header.
+            const pm = (issue.body || '').match(/<!--\s*preview-build:\s*(\S+?)\s*-->/);
+            let preview = labels.includes('preview-hardware-test') ||
+              Boolean(pm && pm[1] === 'true') || previewVer(tag);
 
             let release;
             try {
@@ -58,23 +142,71 @@ jobs:
             } catch (e) {
               if (e.status === 404) {
                 await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-                  body: `⚠️ No release found for tag \`${tag}\` — nothing to promote.` });
+                  body: `⚠️ No release found for tag \`${tag}\`; nothing to promote.` });
                 return;
               }
               throw e;
             }
 
-            if (!release.prerelease) {
+            const bodyVer = bodyVerOf(release);
+            if (previewVer(bodyVer)) preview = true;
+
+            // The train this build was made for: the TrueNAS version in the
+            // notes header (the tag names it too).
+            const builtFor = bodyVer || ((tag.match(/^v(.+?)-memryx/) || [])[1] || '');
+            const train = trainKey(builtFor);
+            const link = `[\`${tag}\`](${release.html_url})`;
+            if (!train) {
               await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-                body: `ℹ️ Release [\`${tag}\`](${release.html_url}) is already promoted (not a prerelease). No change.` });
+                body: `Cannot tell which TrueNAS train ${link} was built for: its release notes name no TrueNAS version ("for TrueNAS SCALE <version>"). No change was made.` });
+              return;
+            }
+            const trains = verifiedTrains(release);
+            const marker = `\n\n<!-- verified-train: ${train} -->\n`;
+            if (trains.has(train)) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `${link} is already approved for TrueNAS train \`${train}\`. No change.` });
+              return;
+            }
+
+            if (preview) {
+              // Marker only. make_latest is explicit: left out, an edit can
+              // default it to true.
+              await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
+                make_latest: 'false', body: (release.body || '') + marker });
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `Verified on TrueNAS ${builtFor}: ${link} is now approved for TrueNAS train \`${train}\`, so get.sh and install.sh install it on train \`${train}\` boxes running that TrueNAS version. Preview builds stay pre-releases and are never promoted to Latest.` });
+              core.info(`Approved preview build ${tag} for train ${train} (marker only).`);
+              return;
+            }
+
+            if (!release.prerelease) {
+              if (trains.size === 0) {
+                // Promoted before per-train sign-off: approved for every
+                // train already. A marker would narrow that to one train.
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `ℹ️ Release ${link} is already promoted (not a prerelease). No change.` });
+                return;
+              }
+              // A full release approved for other trains only: add this
+              // train, no second promotion.
+              await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
+                make_latest: 'false', body: (release.body || '') + marker });
+              await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                body: `Verified on TrueNAS ${builtFor}: ${link} is already promoted, and is now also approved for TrueNAS train \`${train}\`.` });
+              core.info(`Added train ${train} to ${tag}.`);
               return;
             }
 
             // Previous release (by created_at) bounds the changelog range.
+            // Anchor only to promoted stable releases: an interleaved BETA
+            // tag or unpromoted prerelease would bound the range at the wrong
+            // release and publish an empty or wrong commit list.
             const rels = (await github.rest.repos.listReleases({ owner, repo, per_page: 100 })).data
               .filter(r => r.id !== release.id && !r.draft)
               .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            const prev = rels.find(r => new Date(r.created_at) <= new Date(release.created_at));
+            const prev = rels.find(r => !r.prerelease && !previewRelease(r) &&
+              new Date(r.created_at) <= new Date(release.created_at));
 
             // GitHub's PR-based auto-notes.
             let prNotes = '';
@@ -84,7 +216,7 @@ jobs:
               prNotes = (gen.data.body || '').trim();
             } catch (e) { core.warning(`generate-notes failed: ${e.message}`); }
 
-            // Commit list — captures the direct/app pushes PR-notes don't.
+            // Commit list: captures the direct/app pushes PR-notes don't.
             let commits = '';
             if (prev) {
               try {
@@ -101,38 +233,17 @@ jobs:
             if (commits) changelog += `\n### Commits\n${commits}\n`;
             if (!prNotes && !commits) changelog += '\n_Initial release._\n';
 
-            // Only become the "Latest" release if this is the newest STABLE
-            // (non-pre-release) version. Promoting an OLDER build must not
-            // regress Latest to an older version — it still flips to a full
-            // (verified) release, but Latest stays on the newer one. (GitHub's
-            // make_latest:'legacy' picks by date, which would wrongly favour the
-            // just-promoted older build, so compare versions explicitly.) Stable
-            // tags are vX.Y[.Z...]-<driver>... with no '-' inside the version.
-            const tagVer = (t) => {
-              const m = (t || '').match(/^v(\d+(?:\.\d+)*)-/);
-              return m ? m[1].split('.').map(Number) : null;
-            };
-            const cmpVer = (a, b) => {
-              const n = Math.max(a.length, b.length);
-              for (let i = 0; i < n; i++) { const d = (a[i] || 0) - (b[i] || 0); if (d) return d; }
-              return 0;
-            };
-            const thisVer = tagVer(tag);
-            let newestStable = thisVer;  // this release is becoming non-pre-release
-            for (const r of rels) {        // rels = all other non-draft releases
-              if (r.prerelease) continue;  // betas / unverified builds can't be Latest
-              const v = tagVer(r.tag_name);
-              if (v && (!newestStable || cmpVer(v, newestStable) > 0)) newestStable = v;
-            }
-            const makeLatest = (thisVer && newestStable && cmpVer(thisVer, newestStable) >= 0) ? 'true' : 'false';
+            // Newest-stable decision: rationale sits with decideMakeLatest
+            // above. rels = all other non-draft releases.
+            const { makeLatest, newest } = decideMakeLatest(release, rels);
 
             await github.rest.repos.updateRelease({ owner, repo, release_id: release.id,
               prerelease: false, make_latest: makeLatest,
-              body: (release.body || '') + changelog });
+              body: (release.body || '') + changelog + marker });
 
             const latestNote = makeLatest === 'true'
               ? 'and set it as the latest release'
-              : `as a full release (Latest stays on the newer \`${(newestStable || []).join('.')}\`)`;
+              : `as a full release (Latest stays on the newer \`${(newest || []).join('.')}\`)`;
             await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-              body: `✅ Verified — promoted [\`${tag}\`](${release.html_url}) ${latestNote}, and appended the changelog.` });
-            core.info(`Promoted ${tag} (make_latest=${makeLatest}).`);
+              body: `✅ Verified: promoted ${link} ${latestNote}, and appended the changelog. It is approved for TrueNAS train \`${train}\`, so get.sh and install.sh install it on train \`${train}\` boxes running its TrueNAS version.` });
+            core.info(`Promoted ${tag} (make_latest=${makeLatest}), approved for train ${train}.`);

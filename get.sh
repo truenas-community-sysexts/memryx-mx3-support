@@ -1,45 +1,47 @@
 #!/usr/bin/env bash
-# Uninstall the MemryX MX3 sysext. Thin alias for restore.sh, kept under
-# this name because users searching for "uninstall" won't grep for
-# "restore". restore.sh is still shipped in releases for backwards
-# compatibility with old install instructions.
+# Install the MemryX MX3 sysext on TrueNAS from the newest release that a
+# hardware test approved for this box's TrueNAS train and that was built for
+# its TrueNAS version.
 #
-# Usage: curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash -s -- --uninstall
-#    or: curl -fsSL <release-url>/uninstall.sh | sudo bash
-#    or: sudo ./uninstall.sh [--release=TAG] [--force]
+#   curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash
 #
-# --release=TAG fetches restore.sh from that release instead of the newest
-# approved one (only when there is no restore.sh beside this script); every
-# other argument goes to restore.sh.
+# Arguments go after `bash -s --` and pass through to the installer:
+#
+#   ... | sudo bash -s -- --pool=fast        # any install.sh flag
+#   ... | sudo bash -s -- --check            # probe an existing install
+#   ... | sudo bash -s -- --release=TAG      # that release, no selection
+#   ... | sudo bash -s -- --uninstall        # remove it with the approved
+#                                            # release's uninstall.sh
+#
+# What it does:
+#   1. Reads the TrueNAS version (midclt call system.info) and derives the
+#      train: the major version from 26 on (every 26.x release, betas
+#      included, is train 26), major.minor before that (25.10).
+#   2. Lists this repo's releases and picks the newest one approved for that
+#      train and built for that TrueNAS version. A hardware test approves a
+#      build for the train it was built for (promote.yml writes a
+#      verified-train marker into its notes); a full release with no marker
+#      was promoted before per-train sign-off and counts for every train.
+#      Nothing else is ever installed: with no approved build it stops and
+#      names the hardware test that is waiting, if there is one.
+#   3. Downloads THAT release's install.sh, memryx-lib.sh, memryx.raw and
+#      memryx.raw.sha256, checks the image against the checksum, and runs
+#      that release's installer with your arguments and the local image
+#      (every release's installer takes a path to memryx.raw as a positional
+#      argument), so the image and the scripts come from the same release.
+#
+# --check, --help, --uninstall and a path to your own image use only the
+# release's scripts, so on a TrueNAS version with no approved build they take
+# the newest approved release built for this box's own train (never one built
+# for another train, grandfathered or not: its --check and restore.sh know
+# another install). --uninstall runs its uninstall.sh, with its restore.sh
+# and memryx-lib.sh beside it. --release=TAG skips steps 1 and 2 and uses TAG
+# as given. --repo=OWNER/NAME (or MEMRYX_REPO) points all of it at a fork.
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-TAG=""
-ARGS=()
-for arg in "$@"; do
-    case "$arg" in
-        --release=*)
-            TAG="${arg#*=}"
-            [ -n "$TAG" ] || { echo "ERROR: --release= requires a release tag" >&2; exit 2; }
-            ;;
-        *) ARGS+=("$arg") ;;
-    esac
-done
-
-# When piped through `curl | sudo bash`, $0 is /dev/stdin and there is no
-# sibling restore.sh on disk. Detect that case and fetch restore.sh from
-# the release chosen below. Otherwise (run from a checked-out tree, an
-# extracted release tarball, or get.sh's download dir), exec the sibling
-# directly.
-if [ -f "${SCRIPT_DIR}/restore.sh" ]; then
-    exec bash "${SCRIPT_DIR}/restore.sh" ${ARGS[@]+"${ARGS[@]}"}
-fi
-
-# Fallback: stdin path. MEMRYX_REPO is honored to match install.sh's --repo=
-# override.
 REPO="${MEMRYX_REPO:-truenas-community-sysexts/memryx-mx3-support}"
+WORK_DIR=""
 
 # BEGIN approved-release (a verbatim copy lives in get.sh, scripts/install.sh,
 # scripts/uninstall.sh and scripts/restore.sh, each a self-contained curl|bash
@@ -364,32 +366,81 @@ approved_release_tag() {
 }
 # END approved-release
 
-# restore.sh comes from the release approved for this box's TrueNAS version,
-# or else the newest approved release built for its train (removing the
-# sysext loads no modules; another train's restore.sh would run another
-# removal flow), the rule get.sh and install.sh select by, not from whatever
-# GitHub marks Latest.
-if [ -z "$TAG" ]; then
-    TAG=$(approved_release_tag --scripts-only) || {
-        echo "ERROR: no approved release to take restore.sh from; pin one with --release=TAG." >&2
-        exit 1
-    }
-fi
-BASE_URL="https://github.com/${REPO}/releases/download/${TAG}"
-echo "uninstall.sh: fetching restore.sh + memryx-lib.sh from ${REPO} release ${TAG}..." >&2
-TMPDIR=$(mktemp -d /tmp/memryx-uninstall.XXXXXXXXXX)
-trap 'rm -rf "$TMPDIR"' EXIT
-if ! curl -fsSL --max-time 60 "${BASE_URL}/restore.sh" -o "${TMPDIR}/restore.sh"; then
-    echo "ERROR: failed to download restore.sh from ${REPO} release ${TAG}" >&2
-    exit 1
-fi
-if [ ! -s "${TMPDIR}/restore.sh" ]; then
-    echo "ERROR: downloaded restore.sh is empty (${REPO} release ${TAG})" >&2
-    exit 1
-fi
-# memryx-lib.sh is a shared library that restore.sh sources at startup.
-# A download failure is not fatal here: restore.sh has its own fallback
-# that re-fetches the lib if the sibling is missing.
-curl -fsSL --max-time 30 "${BASE_URL}/memryx-lib.sh" -o "${TMPDIR}/memryx-lib.sh" 2>/dev/null || true
-bash "${TMPDIR}/restore.sh" ${ARGS[@]+"${ARGS[@]}"}
-exit $?
+# Download release assets $2... of release $1 into WORK_DIR.
+fetch_assets() {
+    local tag="$1" asset
+    shift
+    for asset in "$@"; do
+        curl -fsSL --retry 3 --max-time 600 -o "${WORK_DIR}/${asset}" \
+            "https://github.com/${REPO}/releases/download/${tag}/${asset}" \
+            || { echo "ERROR: could not download ${asset} from release ${tag}" >&2; return 1; }
+    done
+}
+
+main() {
+    local mode=install tag="" arg image=yes
+    local -a args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --uninstall) mode=uninstall ;;
+            --release=*)
+                tag="${arg#*=}"
+                [ -n "$tag" ] || { echo "ERROR: --release= needs a tag, e.g. --release=v26.0.0-BETA.3-memryx2.1-r15" >&2; exit 2; }
+                ;;
+            --repo=*)
+                REPO="${arg#*=}"
+                [ -n "$REPO" ] || { echo "ERROR: --repo= needs OWNER/NAME" >&2; exit 2; }
+                ;;
+            *) args+=("$arg") ;;
+        esac
+    done
+    # The release's scripts read the repo from the environment: install.sh's
+    # --repo default and uninstall.sh/restore.sh's only override.
+    export MEMRYX_REPO="$REPO"
+
+    # Only an install uses an image: --check, --help and --update-firmware do
+    # not, and a path on the command line is the user's own image.
+    [ "$mode" = install ] || image=no
+    for arg in ${args[@]+"${args[@]}"}; do
+        case "$arg" in --check|--help|--update-firmware|[!-]*) image=no ;; esac
+    done
+
+    if [ -n "$tag" ]; then
+        echo "Release ${tag} (pinned with --release)" >&2
+    elif [ "$image" = yes ]; then
+        tag=$(approved_release_tag) || exit 1
+    else
+        tag=$(approved_release_tag --scripts-only) || exit 1
+    fi
+
+    WORK_DIR=$(mktemp -d "${TMPDIR:-/tmp}/memryx-get.XXXXXX")
+    trap 'rm -rf "$WORK_DIR"' EXIT
+
+    if [ "$mode" = uninstall ]; then
+        # uninstall.sh runs the restore.sh beside it, and restore.sh sources
+        # the memryx-lib.sh beside it, so all three come from the release.
+        fetch_assets "$tag" uninstall.sh restore.sh memryx-lib.sh || exit 1
+        bash "${WORK_DIR}/uninstall.sh" ${args[@]+"${args[@]}"}
+        return
+    fi
+
+    # install.sh sources the memryx-lib.sh beside it.
+    fetch_assets "$tag" install.sh memryx-lib.sh || exit 1
+    if [ "$image" = yes ]; then
+        fetch_assets "$tag" memryx.raw memryx.raw.sha256 || exit 1
+        (cd "$WORK_DIR" && sha256sum -c memryx.raw.sha256) >&2 \
+            || { echo "ERROR: checksum verification failed for memryx.raw from release ${tag}" >&2; exit 1; }
+        args+=("${WORK_DIR}/memryx.raw")
+    fi
+    # An installer from per-train approval on also records which release the
+    # image came from; older ones reject the flag (every release back to r1
+    # refuses an unknown option), and the image alone is enough for them.
+    if grep -q -e '^[[:space:]]*--release=\*)' "${WORK_DIR}/install.sh"; then
+        args=("--release=${tag}" ${args[@]+"${args[@]}"})
+    fi
+    bash "${WORK_DIR}/install.sh" ${args[@]+"${args[@]}"}
+}
+
+# Called on the last line, so bash has read this whole script before
+# anything runs and the installer cannot swallow the rest of it from stdin.
+main "$@"

@@ -1009,15 +1009,15 @@ jobs:
             const tag = `v${process.env.TRUENAS_VERSION}-memryx${process.env.MEMRYX_SDK}-r${process.env.RUN_NUMBER}`;
             const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
 
-            // A pre-release TrueNAS target (BETA/RC) is the 26-beta preview
-            // channel. Those builds must NEVER be promoted to Latest (that would
-            // route stable installs to a beta via install.sh), so they get a
-            // distinct label that promote.yml ignores. Their hardware-test issue
-            // is a verification record only — closing it does not promote.
+            // A pre-release TrueNAS target (BETA/RC) is the preview channel.
+            // Its builds get a distinct label so testers know which kind of
+            // box the issue needs. Closing either kind as completed promotes
+            // the build to a full release for its own train (promote.yml); the
+            // installers still never put a preview build on a stable box.
             const isPreview = /-(?:BETA|RC)\b/i.test(process.env.TRUENAS_VERSION);
             const label = isPreview ? 'preview-hardware-test' : 'hardware-test';
             const labelDescription = isPreview
-              ? 'Preview (TrueNAS beta) build verification — never auto-promoted to Latest'
+              ? 'Preview (TrueNAS beta/RC) build awaiting hardware verification'
               : 'Auto-build awaiting hardware verification';
             // Title: what to test | on what | which build. The tag goes last,
             // verbatim: the duplicate check below matches on it. The kernel
@@ -1070,11 +1070,11 @@ jobs:
 
             const signOff = isPreview
               ? [
-                  `- Works: close this issue as **completed** to record the sign-off. That approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}. This preview build stays a pre-release and is **never** promoted to Latest.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog. Stable boxes never install a preview build. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
                   `- Broken: comment what failed, then close as **not planned**.`,
                 ]
               : [
-                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release marked Latest, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
                   `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release.`,
                 ];
 
@@ -1085,8 +1085,8 @@ jobs:
               labels: [label],
               body: [
                 isPreview
-                  ? `An auto-build published a new **TrueNAS preview (beta)** release that needs hardware verification. It stays a pre-release permanently.`
-                  : `An auto-build published a new release that needs hardware verification before being promoted to **Latest**.`,
+                  ? `An auto-build published a new **TrueNAS preview (beta/RC)** release that needs hardware verification. Signing it off makes it a full release for this train only.`
+                  : `An auto-build published a new release that needs hardware verification before it is promoted to a full release.`,
                 ``,
                 `**Release:** [${tag}](${releaseUrl})`,
                 `<!-- release-tag: ${tag} -->`,

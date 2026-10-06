@@ -446,8 +446,8 @@ class NoCandidate(unittest.TestCase):
         self.assertIn("exists for it yet.", p.stderr)
 
     def test_pending_hint_excludes_preview_builds_on_a_stable_box(self):
-        # A preview build is never promoted, so a stable box must not be
-        # promised an install "once promoted".
+        # A stable box never installs a preview build, promoted or not, so
+        # it must not be promised an install "once promoted".
         p = run_selection([preview_build(15)], "26.0.0-BETA.3", train="26",
                           mode="scripts")
         self.assertNotEqual(p.returncode, 0)

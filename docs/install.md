@@ -20,8 +20,8 @@ Release tags encode the versions: `v<truenas>-memryx<sdk>-r<run>` (e.g.
 picking, and `install.sh` applies the same rule when it is run on its own:
 
 1. Read the TrueNAS version (`midclt call system.info`) and derive the
-   **train**: the major version from 26 on (every 26.x release, betas
-   included, is train 26), `major.minor` before that (`25.10`, `25.04`).
+   **train**: the major version from 26 on (every 27.x release, RCs
+   included, is train 27), `major.minor` before that (`25.10`, `25.04`).
 2. List every release and keep the **approved** ones. A release is approved
    for a train when its notes carry `<!-- verified-train: <train> -->`, which
    `promote.yml` writes when that train's hardware-test issue closes as

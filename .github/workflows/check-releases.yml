@@ -189,13 +189,18 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
-      # TrueNAS preview (beta) check: TrueNAS 26 betas are not published to
+      # TrueNAS preview (beta/RC) check: previews are not published to
       # scale-build tags or download.truenas.com and ship no GITMANIFEST. They
-      # live under a browsable channel (iso.sys.truenas.net/TrueNAS-26-BETA/).
-      # Scrape that listing for the highest X.Y[.Z]-BETA.N / -RC.N, gate on the
-      # ISO actually being uploaded, and bump truenas_preview.version. The
-      # runner is pinned in tracked-versions.json (no GITMANIFEST to resolve
-      # from); build.yml downloads the ISO via an iso_url override.
+      # live on iso.sys.truenas.net in one browsable directory per channel,
+      # and the directory moves with the release: 26.0.0-BETA.3 was under
+      # TrueNAS-26-BETA/, 27.0.0-RC.1 (26 renamed to 27) is under
+      # TrueNAS-27-RC/. latest-preview.py reads the server's root index (every
+      # channel at once) plus the tracked channel's listing, and returns the
+      # highest X.Y[.Z]-BETA.N / -RC.N with the channel that holds it. Gate on
+      # the ISO actually being uploaded, then bump truenas_preview.version and
+      # channel_url. The runner is pinned in tracked-versions.json (no
+      # GITMANIFEST to resolve from); build.yml downloads the ISO via an
+      # iso_url override.
       # -----------------------------------------------------------------------
       - name: Check for new TrueNAS preview release
         id: preview
@@ -206,41 +211,29 @@ jobs:
           set -o pipefail
           echo "Currently tracked preview: ${CURRENT_PREVIEW} (channel ${CHANNEL_URL})"
 
-          if ! LISTING=$(curl -fsSL "$CHANNEL_URL"); then
-            echo "Preview channel listing not reachable at ${CHANNEL_URL}. Skipping preview check this run."
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # Either listing may fail on its own; the script uses whatever it
+          # got and prints nothing when neither holds a preview version.
+          ROOT_URL=$(printf '%s' "$CHANNEL_URL" | sed -E 's|^(https://[^/]+/).*$|\1|')
+          curl -fsSL "$ROOT_URL" -o "${RUNNER_TEMP}/preview-root.html" \
+            || echo "Root listing not reachable at ${ROOT_URL}; using the tracked channel only."
+          curl -fsSL "$CHANNEL_URL" -o "${RUNNER_TEMP}/preview-channel.html" \
+            || echo "Tracked channel listing not reachable at ${CHANNEL_URL}."
 
-          # Order beta/RC versions: numeric base first (26.0.0), then channel
-          # rank (BETA < RC), then the pre-release number. Shared by the
-          # "highest in listing" and "is it actually higher" comparisons.
-          read -r -d '' PREVIEW_SORT_PY <<'PY' || true
-          import sys
-          def key(v):
-              base, _, pre = v.partition('-')
-              bp = [int(x) for x in base.split('.')]
-              bp += [0] * (3 - len(bp))
-              typ, _, num = pre.partition('.')
-              rank = {'BETA': 0, 'RC': 1}.get(typ.upper(), -1)
-              return (bp, rank, int(num) if num.isdigit() else 0)
-          vers = [l.strip() for l in sys.stdin if l.strip()]
-          if vers:
-              print(sorted(vers, key=key)[-1])
-          PY
-
-          # Hrefs look like ./26.0.0-BETA.2/?wrap=1 — extract version dirs.
-          LATEST_PREVIEW=$(printf '%s' "$LISTING" \
-            | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?-(BETA|RC)\.[0-9]+' \
-            | sort -u \
-            | python3 -c "$PREVIEW_SORT_PY")
+          RESULT=$(python3 .github/scripts/latest-preview.py \
+            --channel-url "$CHANNEL_URL" \
+            --root-listing "${RUNNER_TEMP}/preview-root.html" \
+            --channel-listing "${RUNNER_TEMP}/preview-channel.html" \
+            --current "$CURRENT_PREVIEW")
+          LATEST_PREVIEW=$(printf '%s\n' "$RESULT" | sed -n 's/^version=//p')
+          LATEST_CHANNEL=$(printf '%s\n' "$RESULT" | sed -n 's/^channel_url=//p')
+          HIGHER=$(printf '%s\n' "$RESULT" | sed -n 's/^higher=//p')
 
           if [ -z "$LATEST_PREVIEW" ]; then
-            echo "No beta/RC versions found in channel listing. Skipping preview check."
+            echo "No beta/RC versions found in the preview listings. Skipping preview check."
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          echo "Latest preview in channel: ${LATEST_PREVIEW}"
+          echo "Latest preview: ${LATEST_PREVIEW} (channel ${LATEST_CHANNEL})"
 
           if [ "$LATEST_PREVIEW" = "$CURRENT_PREVIEW" ]; then
             echo "No new TrueNAS preview release"
@@ -249,8 +242,7 @@ jobs:
           fi
 
           # Only advance forward (guard against listing churn / dir deletion).
-          HIGHER=$(printf '%s\n%s\n' "$CURRENT_PREVIEW" "$LATEST_PREVIEW" | python3 -c "$PREVIEW_SORT_PY")
-          if [ "$HIGHER" != "$LATEST_PREVIEW" ]; then
+          if [ "$HIGHER" != "true" ]; then
             echo "Latest preview ${LATEST_PREVIEW} is not higher than tracked ${CURRENT_PREVIEW} -- ignoring"
             echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
@@ -258,7 +250,7 @@ jobs:
 
           # ISO-file gate: the version dir can exist before the ISO finishes
           # uploading. HEAD-check the actual file URL.
-          ISO_URL="${CHANNEL_URL}${LATEST_PREVIEW}/TrueNAS-${LATEST_PREVIEW}.iso"
+          ISO_URL="${LATEST_CHANNEL}${LATEST_PREVIEW}/TrueNAS-${LATEST_PREVIEW}.iso"
           if ! curl -fsI "$ISO_URL" >/dev/null 2>&1; then
             echo "Preview ISO not yet published at ${ISO_URL}. Will retry on next scheduled run."
             echo "changed=false" >> "$GITHUB_OUTPUT"
@@ -269,6 +261,7 @@ jobs:
           {
             echo "changed=true"
             echo "version=${LATEST_PREVIEW}"
+            echo "channel_url=${LATEST_CHANNEL}"
           } >> "$GITHUB_OUTPUT"
 
       # -----------------------------------------------------------------------
@@ -401,6 +394,7 @@ jobs:
           CURRENT_TRAIN: ${{ steps.tracked.outputs.train }}
           PREVIEW_CHANGED: ${{ steps.preview.outputs.changed }}
           NEW_PREVIEW_VERSION: ${{ steps.preview.outputs.version }}
+          NEW_PREVIEW_CHANNEL_URL: ${{ steps.preview.outputs.channel_url }}
           MEMRYX_CHANGED: ${{ steps.memryx.outputs.changed }}
           NEW_SDK: ${{ steps.memryx.outputs.sdk }}
           NEW_DRIVER_REF: ${{ steps.memryx.outputs.driver_ref }}
@@ -416,6 +410,7 @@ jobs:
               s['truenas']['train']   = os.environ['NEW_TRAIN']
           if os.environ.get('PREVIEW_CHANGED') == 'true':
               s['truenas_preview']['version'] = os.environ['NEW_PREVIEW_VERSION']
+              s['truenas_preview']['channel_url'] = os.environ['NEW_PREVIEW_CHANNEL_URL']
           if os.environ.get('MEMRYX_CHANGED') == 'true':
               s['memryx']['sdk']        = os.environ['NEW_SDK']
               s['memryx']['driver_ref'] = os.environ['NEW_DRIVER_REF']
@@ -484,7 +479,7 @@ jobs:
       # Dispatch build.yml. Two independent targets share the current driver:
       #   - stable: built when TrueNAS stable or the MemryX SDK moved.
       #   - preview: built when the TrueNAS beta or the SDK moved.
-      # So an SDK bump produces BOTH a 25.x and a 26-beta build ("each release
+      # So an SDK bump produces BOTH a stable and a preview (beta/RC) build ("each release
       # has both"); a TrueNAS-only bump on one channel builds only that channel.
       # Every build publishes as a prerelease and installs nowhere until a
       # hardware test on its train signs it off (build.yml no longer takes a

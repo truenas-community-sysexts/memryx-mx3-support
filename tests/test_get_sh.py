@@ -1,5 +1,6 @@
 """End-to-end runs of get.sh, uninstall.sh and install.sh against stub
-`midclt`, `curl` (and for install.sh `id` and `unsquashfs`) commands on PATH.
+`midclt`, `uname`, `curl` (and for install.sh `id` and `unsquashfs`) commands
+on PATH.
 
 The curl stub serves canned GitHub API pages and issues, and for a release
 download writes a fake asset: install.sh, uninstall.sh and restore.sh stubs
@@ -110,12 +111,27 @@ ID_STUB = textwrap.dedent("""\
     if [ "${1:-}" = -u ]; then echo 0; else exec /usr/bin/id "$@"; fi
     """)
 
+# The running kernel is the selection key.
+UNAME_STUB = textwrap.dedent("""\
+    #!/usr/bin/env bash
+    [ "${1:-}" = "-r" ] && { echo "$STUB_KVER"; exit 0; }
+    exec /usr/bin/uname "$@"
+    """)
+
 # install.sh unpacks memryx-preinit.sh (and, with a local image and no
-# sibling lib, memryx-lib.sh) out of the image.
+# sibling lib, memryx-lib.sh) out of the image, and lists the image's
+# usr/lib/modules to check it was built for the running kernel: the stub
+# image holds a module for STUB_IMAGE_KVER, else for the running kernel.
 UNSQUASHFS_STUB = textwrap.dedent("""\
     #!/usr/bin/env python3
     import os, sys
     args = sys.argv[1:]
+    if "-l" in args:
+        kver = os.environ.get("STUB_IMAGE_KVER", os.environ.get("STUB_KVER", ""))
+        print("squashfs-root")
+        if kver:
+            print(f"squashfs-root/usr/lib/modules/{kver}/extra/memx_cascade_plus_pcie.ko")
+        sys.exit(0)
     if "-d" in args:
         d = os.path.join(args[args.index("-d") + 1], "usr/lib/memryx")
         want = args[-1]
@@ -133,10 +149,18 @@ R13 = "v26.0.0-BETA.3-memryx2.1-r13"
 R14 = "v25.10.7-memryx2.1-r14"
 R15 = "v26.0.0-BETA.3-memryx2.1-r15"
 
-K95 = "6.12.95-production+truenas"
-K99 = "6.12.99-production+truenas"
+K15 = "6.12.15-production+truenas"
+K33 = "6.12.33-production+truenas"
+K91 = "6.12.91-production+truenas"
 K105 = "6.12.105-production+truenas"
 K42 = "6.18.42-production+truenas"
+K50 = "6.18.50-production+truenas"
+K60 = "6.18.60-production+truenas"
+
+# The kernel each TrueNAS version in these tests runs.
+KVER_OF = {"25.10.1": K33, "25.10.3": K33, "25.10.4": K91, "25.10.7": K105,
+           "25.04.2": K15, "26.0.0-BETA.3": K42, "26.0.0-BETA.4": K50,
+           "26.1.0": K60}
 
 
 def releases(signed_off=True):
@@ -150,9 +174,9 @@ def releases(signed_off=True):
                 published="2026-09-03T10:59:34Z"),
         release(R13, "26.0.0-BETA.3", "Halfmoon", kver=K42, prerelease=True,
                 published="2026-08-21T06:52:40Z"),
-        release(R10, "25.10.3", kver=K95, published="2026-06-26T03:47:08Z"),
-        release(R6, "25.10.4", kver=K99, published="2026-06-14T03:40:29Z"),
-        release(R5, "25.10.4", kver=K99, published="2026-06-12T00:51:42Z"),
+        release(R10, "25.10.3", kver=K33, published="2026-06-26T03:47:08Z"),
+        release(R6, "25.10.4", kver=K91, published="2026-06-14T03:40:29Z"),
+        release(R5, "25.10.4", kver=K91, published="2026-06-12T00:51:42Z"),
     ]
 
 
@@ -169,7 +193,8 @@ class Stubbed(unittest.TestCase):
         self.bin = self.dir / "bin"
         self.bin.mkdir()
         for name, text in (("curl", CURL_STUB), ("midclt", MIDCLT_STUB),
-                           ("id", ID_STUB), ("unsquashfs", UNSQUASHFS_STUB)):
+                           ("id", ID_STUB), ("uname", UNAME_STUB),
+                           ("unsquashfs", UNSQUASHFS_STUB)):
             path = self.bin / name
             path.write_text(text)
             path.chmod(0o755)
@@ -181,7 +206,8 @@ class Stubbed(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_bash(self, argv, version, rels=None, issues=ISSUES, **env):
+    def run_bash(self, argv, version, rels=None, issues=ISSUES, kver=None,
+                 **env):
         pages = self.dir / "pages.json"
         pages.write_text(json.dumps([releases() if rels is None else rels]))
         issues_file = self.dir / "issues.json"
@@ -189,6 +215,7 @@ class Stubbed(unittest.TestCase):
         full_env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}",
                         STUB_LOG=str(self.log), STUB_PAGES=str(pages),
                         STUB_ISSUES=str(issues_file), STUB_VERSION=version,
+                        STUB_KVER=kver or KVER_OF.get(version, "6.12.200-production+truenas"),
                         TMPDIR=str(self.tmp))
         full_env.pop("MEMRYX_REPO", None)
         full_env.update(env)
@@ -209,7 +236,7 @@ class GetSh(Stubbed):
     def get(self, *args, version="25.10.4", **kw):
         return self.run_bash([str(GET_SH), *args], version, **kw)
 
-    def test_installs_the_approved_build_for_this_version(self):
+    def test_installs_the_approved_build_for_this_kernel(self):
         p = self.get()
         self.assertEqual(p.returncode, 0, p.stderr)
         lines = p.stdout.splitlines()
@@ -224,8 +251,9 @@ class GetSh(Stubbed):
                                  "memryx.raw.sha256")))
 
     def test_each_box_gets_its_own_approved_build(self):
+        # 25.10.1 never had a build: it runs the 25.10.3 kernel.
         for version, tag in (("25.10.4", R6), ("25.10.3", R10),
-                             ("26.0.0-BETA.3", R15)):
+                             ("25.10.1", R10), ("26.0.0-BETA.3", R15)):
             p = self.get(version=version)
             self.assertEqual(p.returncode, 0, p.stderr)
             self.assertIn(f"RAN install.sh from {tag} ", p.stdout)
@@ -249,8 +277,8 @@ class GetSh(Stubbed):
         p = self.get(version="25.10.7")
         self.assertNotEqual(p.returncode, 0)
         self.assertEqual(self.downloads(), [])
-        self.assertIn("No approved stable release found for TrueNAS version "
-                      "25.10.7.", p.stderr)
+        self.assertIn(f"No approved stable release found for kernel {K105} "
+                      "(TrueNAS 25.10.7).", p.stderr)
         self.assertIn("#22 Hardware test", p.stderr)
 
     def test_unverified_beta_is_not_installed_on_a_beta_box(self):
@@ -267,8 +295,8 @@ class GetSh(Stubbed):
         self.assertNotIn("RAN install.sh", p.stdout)
 
     def test_check_uses_an_approved_release_of_the_train_and_no_image(self):
-        # --check loads no modules: a box on a TrueNAS version with no
-        # approved build still gets an installer of its train to probe with.
+        # --check loads no modules: a box on a kernel with no approved build
+        # still gets an installer of its train to probe with.
         p = self.get("--check", version="25.10.7")
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertEqual(p.stdout.splitlines()[0],
@@ -413,9 +441,9 @@ class SelectionParity(Stubbed):
     text identical)."""
 
     SCENARIOS = (
-        ("25.10.3", True), ("25.10.4", True), ("25.10.7", True),
-        ("26.0.0-BETA.3", True), ("26.0.0-BETA.3", False),
-        ("26.1.0", True), ("25.04.2", True),
+        ("25.10.1", True), ("25.10.3", True), ("25.10.4", True),
+        ("25.10.7", True), ("26.0.0-BETA.3", True), ("26.0.0-BETA.3", False),
+        ("26.0.0-BETA.4", True), ("26.1.0", True), ("25.04.2", True),
     )
 
     def chosen(self, path, version, signed_off):
@@ -429,6 +457,7 @@ curl() {{
     esac
 }}
 midclt() {{ echo '{{"version": "{version}"}}'; }}
+uname() {{ echo '{KVER_OF[version]}'; }}
 approved_release_tag
 """, path=path)
         return p.returncode == 0, p.stdout.strip()
@@ -543,8 +572,44 @@ class InstallSh(Stubbed):
         self.assertIn(f"  Release tag:       {R6}", p.stdout)
         self.assertIn("  MemryX SDK:        2.1", p.stdout)
         self.assertIn("Checksum OK", p.stdout)
+        self.assertIn(f"Image kernel matches running kernel ({K91})", p.stdout)
         self.assertEqual(sorted(self.downloads()),
                          [f"{R6}/memryx.raw", f"{R6}/memryx.raw.sha256"])
+
+    def test_unbuilt_version_installs_the_build_for_its_kernel(self):
+        p = self.install(version="25.10.1")
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertIn(f"  Release tag:       {R10}", p.stdout)
+
+    def test_image_for_another_kernel_is_refused_before_any_change(self):
+        # A pinned release (or a hand-supplied image) built for another
+        # kernel: its module could never load.
+        p = self.install(f"--release={R10}", STUB_IMAGE_KVER=K33)
+        self.assertEqual(p.returncode, 1, p.stderr + p.stdout)
+        self.assertIn(f"this memryx.raw was not built for the running kernel ({K91})",
+                      p.stderr)
+        self.assertIn(f"    {K33}", p.stderr)
+        self.assertNotIn("=== Installing memryx.raw ===", p.stdout)
+        self.assertNotIn("[dry-run] would:", p.stdout)
+
+    def test_image_without_a_module_directory_is_refused(self):
+        p = self.install(f"--release={R6}", STUB_IMAGE_KVER="")
+        self.assertEqual(p.returncode, 1, p.stderr + p.stdout)
+        self.assertIn("contains no kernel module directory at all", p.stderr)
+
+    def test_live_image_is_replaced_by_rename_not_rewritten(self):
+        # The pool copy is the loop-mounted live image on a reinstall: the
+        # new one is staged beside it and renamed over it.
+        p = self.install()
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        raw = "/mnt/tank/.config/memryx/memryx.raw"
+        lines = p.stdout.splitlines()
+        cp = next(i for i, ln in enumerate(lines)
+                  if ln.startswith("[dry-run] would: cp ") and ln.endswith(f" {raw}.new"))
+        mv = lines.index(f"[dry-run] would: mv -f {raw}.new {raw}")
+        self.assertLess(cp, mv)
+        self.assertFalse(any(ln.startswith("[dry-run] would: cp ") and ln.endswith(f" {raw}")
+                             for ln in lines), lines)
 
     def test_nothing_approved_stops_before_any_download(self):
         p = self.install(version="26.0.0-BETA.3", rels=releases(signed_off=False))

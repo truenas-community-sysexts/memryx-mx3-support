@@ -51,7 +51,9 @@ both; a TrueNAS-only bump on one channel builds just that channel.
 
 - **TrueNAS stable half**: identical to the sibling sysexts — newest stable
   `scale-build` tag, train resolved from `download.truenas.com`, gated on the ISO
-  being published. Bumps `truenas.version` / `truenas.train`.
+  being published. Bumps `truenas.version` / `truenas.train`. A new version
+  whose kernel an existing build already covers is not rebuilt (see
+  [Kernel-keyed builds](#kernel-keyed-builds)).
 - **TrueNAS preview half**: tracks the latest TrueNAS beta or RC
   (`truenas_preview.version`, e.g. `27.0.0-RC.1`; TrueNAS 26 was renamed 27 at its
   first RC). Previews are not in `scale-build` tags and ship no GITMANIFEST. They
@@ -98,9 +100,16 @@ in `lint.yml`.
 
 ## Release tagging + promotion
 
-- **Tag:** `v<truenas>-memryx<sdk>-r<run_number>` (e.g. `v25.10.4-memryx2.1-r12`).
-  The `-r<run>` suffix is monotonic per workflow, so every dispatch gets a unique
-  tag even on same-commit retries (GitHub immutable-release tag-burn).
+- **Tag:** `k<kernel>-memryx<sdk>-r<run_number>` (e.g. `k6.12.105-memryx2.1-r17`,
+  the kernel cut at its first `-`), titled `Kernel <kernel> (TrueNAS <version>) -
+  MemryX SDK <sdk> (r<run>)`. Releases from before kernel-keyed builds keep their
+  `v<truenas>-memryx<sdk>-r<run>` tags. The `-r<run>` suffix is monotonic per
+  workflow, so every dispatch gets a unique tag even on same-commit retries
+  (GitHub immutable-release tag-burn), and it orders builds of both tag schemes
+  for the Latest decision. The release notes keep the `for TrueNAS SCALE
+  <version> (<train>)` header and the `Target kernel` row:
+  `tests/test_notes_contract.py` renders the notes and feeds them to every
+  parser.
 - **Every** build publishes as a **prerelease** and opens one hardware-test
   issue: `hardware-test` for a stable target, `preview-hardware-test` for a
   TrueNAS beta/RC one. There is no override that publishes straight to Latest:
@@ -117,8 +126,53 @@ in `lint.yml`.
   installs a preview build.
 - `get.sh` and `install.sh` install a build on a train only when its notes
   carry that train's marker, or when it is a full release with no marker at
-  all. Nothing else is ever installed, on stable or preview boxes. GitHub's
-  "Latest" flag is cosmetic; nothing selects by it.
+  all, and only on the kernel it was built for. Nothing else is ever
+  installed, on stable or preview boxes. GitHub's "Latest" flag selects
+  nothing for `get.sh`; only the older `releases/latest/download/install.sh`
+  one-liner runs the Latest release's installer.
+
+## Kernel-keyed builds
+
+A sysext's kernel module binds to the exact kernel string (vermagic must
+equal `uname -r`), and TrueNAS point releases usually reuse the previous
+release's kernel. The pipeline is keyed accordingly:
+
+- `check-releases.yml` resolves a new stable version's kernel from its
+  `rootfs.mtree` manifest. If a release for that kernel (with the current
+  MemryX SDK) already exists and is served on the new version's train (a full
+  release with that train's `verified-train` marker, or a grandfathered one),
+  no build is dispatched; `tracked-versions.json` still updates and the
+  installer serves the new version by kernel match. If the only coverage is a
+  build still awaiting its hardware test on that train, no duplicate build is
+  dispatched either, but the tracked version holds until that build is
+  approved (so the kernel keeps a rebuild path if a failed build is deleted).
+  Preview (BETA/RC) builds and builds from another train never count as
+  coverage ([`check-kernel-coverage.py`](../.github/scripts/check-kernel-coverage.py)).
+- Coverage only counts while the Latest release is kernel-keyed (its tag
+  starts with `k`). The older one-liner runs the `install.sh` attached to
+  Latest, and until the first k-tagged build is promoted that is the
+  pre-migration installer, which matches exact TrueNAS versions only; a
+  skipped build would leave the new version with nothing it can serve. So
+  until then, and whenever the Latest lookup fails, every new stable version
+  builds as before. (`get.sh` does not depend on Latest: it runs the approved
+  release's own installer on that release's image.)
+- A new kernel, an SDK bump, or an unresolvable kernel always builds.
+- `install.sh` (and `get.sh`, `uninstall.sh` and `restore.sh`, which carry the
+  same selection code) matches `uname -r` against a release's `Target kernel`
+  row, falling back to the short kernel in a k-tag when a body lost its row
+  (the coverage gate's rule), and only from the box's own train: the
+  userspace (`libmemx`, `mx_accl`, `mxa_manager`) is staged on a runner
+  matched to that train's base system. It then checks the image's own
+  `usr/lib/modules/<kernel>` before installing. The `memryx.kver` asset
+  carries the same kernel string for external tooling; the installers do not
+  read it (older immutable releases predate it).
+- The README supported versions table is kernel-keyed too: `.github/kernel-map.json`
+  (version to kernel, from each release's `rootfs.mtree`, refreshed by
+  `gen-kernel-map.py`) plus the releases give one row per kernel with the
+  range of versions it covers.
+- Hardware-test sign-off is per build, which now means per kernel and train:
+  one verification covers every TrueNAS version of that train sharing that
+  kernel.
 
 ## Verification status
 
@@ -187,6 +241,7 @@ End-to-end validated on bare-metal-flashed hardware + TrueNAS-in-Proxmox:
 ## Lint
 
 [`lint.yml`](../.github/workflows/lint.yml) runs `shellcheck --severity=warning`
-over `scripts/*.sh` + `.github/scripts/*.sh`, validates `tracked-versions.json`
-shape, and runs `actionlint` (with the same shellcheck severity) over the
-workflows.
+over `get.sh`, `scripts/*.sh` + `.github/scripts/*.sh`, validates
+`tracked-versions.json` shape, runs `actionlint` (with the same shellcheck
+severity) over the workflows, byte-compiles `.github/scripts/*.py` and runs the
+unit tests in `tests/`.

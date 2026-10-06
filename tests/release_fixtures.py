@@ -1,8 +1,9 @@
 """Shared release fixture mirroring the body build.yml's notes template renders.
 
-The release-selection block in get.sh / install.sh / uninstall.sh /
-restore.sh parses that body, so a template change breaks the suite instead of
-silently reverting every new release to a no-match.
+Every parser of the release-notes format (the release-selection block in
+get.sh / install.sh / uninstall.sh / restore.sh, and gen-supported-versions.py)
+tests against this one builder, so a template change breaks the suite instead
+of silently reverting every new release to a no-match.
 
 Per-train approval: `verified` appends one verified-train line per train in
 the form promote.yml writes it (tests/test_promote.py holds the form to what

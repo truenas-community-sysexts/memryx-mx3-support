@@ -72,7 +72,7 @@ Releases are tagged by kernel: `k<kernel>-memryx<sdk>-r<run>` (for example `k6.1
 | Stable | `6.12.91-production+truenas` | 25.10.4 | MemryX SDK 2.1 | [`v25.10.4-memryx2.1-r6`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v25.10.4-memryx2.1-r6) |
 | Stable | `6.12.33-production+truenas` | 25.10.0 - 25.10.3.1 | MemryX SDK 2.1 | [`v25.10.3-memryx2.1-r10`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v25.10.3-memryx2.1-r10) |
 | Stable | `6.12.15-production+truenas` | 25.04.0 - 25.04.2.6 | - | _not built yet_ |
-| Preview (beta) | `6.18.52-production+truenas` | 27.0.0-RC.1 | MemryX SDK 2.1 | [`v27.0.0-RC.1-memryx2.1-r16`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v27.0.0-RC.1-memryx2.1-r16) |
+| Preview (beta) | `6.18.52-production+truenas` | 27.0.0-RC.1 | MemryX SDK 2.1 | [`k6.18.52-memryx2.1-r18`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/k6.18.52-memryx2.1-r18) |
 | Preview (beta) | `6.18.42-production+truenas` | 26.0.0-BETA.3 | MemryX SDK 2.1 | [`v26.0.0-BETA.3-memryx2.1-r15`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v26.0.0-BETA.3-memryx2.1-r15) |
 | Preview (beta) | `6.18.23-production+truenas` | 26.0.0-BETA.2 | MemryX SDK 2.1 | [`v26.0.0-BETA.2-memryx2.1-r9`](https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/tag/v26.0.0-BETA.2-memryx2.1-r9) |
 <!-- END supported-versions -->

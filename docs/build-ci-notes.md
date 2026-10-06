@@ -52,12 +52,15 @@ both; a TrueNAS-only bump on one channel builds just that channel.
 - **TrueNAS stable half**: identical to the sibling sysexts — newest stable
   `scale-build` tag, train resolved from `download.truenas.com`, gated on the ISO
   being published. Bumps `truenas.version` / `truenas.train`.
-- **TrueNAS preview half**: tracks the latest TrueNAS 26 beta (`truenas_preview.version`,
-  e.g. `26.0.0-BETA.2`). 26 betas are not in `scale-build` tags and ship no
-  GITMANIFEST, so it scrapes the browsable channel listing
-  (`truenas_preview.channel_url`, `iso.sys.truenas.net/TrueNAS-26-BETA/`) for the
+- **TrueNAS preview half**: tracks the latest TrueNAS beta or RC
+  (`truenas_preview.version`, e.g. `27.0.0-RC.1`; TrueNAS 26 was renamed 27 at its
+  first RC). Previews are not in `scale-build` tags and ship no GITMANIFEST. They
+  are published on `iso.sys.truenas.net` in one directory per channel, and the
+  directory moves with the release (`TrueNAS-26-BETA/`, then `TrueNAS-27-RC/`), so
+  `.github/scripts/latest-preview.py` reads the server's root index (every
+  channel) plus the tracked `truenas_preview.channel_url` listing, picks the
   highest `X.Y.Z-BETA.N` / `-RC.N`, gates on the ISO being uploaded, and bumps
-  `truenas_preview.version`. The runner is pinned (`truenas_preview.runner`,
+  `truenas_preview.version` and `channel_url` together. The runner is pinned (`truenas_preview.runner`,
   `ubuntu-24.04`) since there is no GITMANIFEST to resolve from, and `build.yml`
   fetches the ISO via an `iso_url` override. Preview builds publish as permanent
   pre-releases (label `preview-hardware-test`) and are never promoted to Latest.
@@ -75,10 +78,10 @@ both; a TrueNAS-only bump on one channel builds just that channel.
 {
   "truenas": { "version": "25.10.4", "train": "Goldeye" },
   "truenas_preview": {
-    "version": "26.0.0-BETA.2",     // latest TrueNAS 26 beta; scraped from channel_url
+    "version": "27.0.0-RC.1",       // latest TrueNAS beta/RC; see latest-preview.py
     "train": "Halfmoon",
-    "runner": "ubuntu-24.04",       // pinned: 26 betas ship no GITMANIFEST to resolve from
-    "channel_url": "https://iso.sys.truenas.net/TrueNAS-26-BETA/"
+    "runner": "ubuntu-24.04",       // pinned: previews ship no GITMANIFEST to resolve from
+    "channel_url": "https://iso.sys.truenas.net/TrueNAS-27-RC/"  // moves with the release
   },
   "memryx": {
     "sdk": "2.1",                       // major.minor; userspace debs pinned <sdk>.*

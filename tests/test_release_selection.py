@@ -496,9 +496,13 @@ class TrainKey(unittest.TestCase):
             self.assertIsNone(train_key(v), v)
 
     def test_tracked_versions_have_a_train(self):
+        # check-releases moves these versions, so pin the rule, not the keys:
+        # the preview went from train 26 to 27 when TrueNAS 26 was renamed.
         tracked = json.loads(TRACKED.read_text())
-        self.assertEqual(train_key(tracked["truenas"]["version"]), "25.10")
-        self.assertEqual(train_key(tracked["truenas_preview"]["version"]), "26")
+        stable = tracked["truenas"]["version"]
+        preview = tracked["truenas_preview"]["version"]
+        self.assertIsNotNone(train_key(stable), stable)
+        self.assertEqual(train_key(preview), preview.split(".")[0], preview)
 
 
 STUB = """

@@ -20,6 +20,22 @@ All notable changes to this project are documented here.
     cached trains kept when the train listing comes back empty), and
     `update-supported-versions.yml` refreshes both and paginates the
     releases.
+  - `get.sh`, `install.sh`, `uninstall.sh` and `restore.sh` select by the
+    running kernel: a release's `Target kernel` notes row must equal
+    `uname -r` (a `k<kernel>-...` tag whose notes lost the row matches by
+    its tag, promoted only). A box on a version that never had a build of
+    its own gets the build for its kernel. The **train guard** serves a
+    kernel match only from the box's own train, since the userspace is
+    staged against that train's base system; a refused cross-train match is
+    named in a warning. Releases without a kernel row fall back to the exact
+    TrueNAS version. The channel gate (a stable box never installs a BETA/RC
+    build, by tag or notes header) and the approval gate are unchanged, and
+    the no-match message still names the waiting hardware-test issues. The
+    shared block stays a verbatim copy in all four scripts.
+  - `install.sh` refuses an image whose `usr/lib/modules/<kernel>` does not
+    match the running kernel before changing anything, and replaces the
+    live pool image by staging `memryx.raw.new` and renaming it over the old
+    one instead of rewriting the loop-mounted file in place.
 - **Per-train approval, and a `get.sh` bootstrap.** A hardware test now approves
   a build for the TrueNAS train it was built for, and nothing unapproved is ever
   installed.

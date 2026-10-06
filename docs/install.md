@@ -22,30 +22,44 @@ picking, and `install.sh` applies the same rule when it is run on its own:
 1. Read the TrueNAS version (`midclt call system.info`) and derive the
    **train**: the major version from 26 on (every 27.x release, RCs
    included, is train 27), `major.minor` before that (`25.10`, `25.04`).
+   Read the running kernel (`uname -r`).
 2. List every release and keep the **approved** ones. A release is approved
    for a train when its notes carry `<!-- verified-train: <train> -->`, which
    `promote.yml` writes when that train's hardware-test issue closes as
    completed; a full (non-prerelease) release with no marker at all was
    promoted before per-train sign-off and counts for every train.
-3. Of those, take the newest built for this box's exact TrueNAS version
-   (releases are tagged `v<truenas>-...`).
+3. Of those, take the newest built for this box's **running kernel**: the
+   `Target kernel` row in the release notes must equal `uname -r` exactly
+   (a kernel-keyed `k<kernel>-...` tag whose notes lost the row matches by
+   the short kernel in its tag). TrueNAS point releases often ship the same
+   kernel, so a box on a version that never had a build of its own still
+   gets the build for its kernel.
+4. The kernel match is scoped to the box's **own train** (the train guard):
+   the sysext also ships userspace (`libmemx`, `mx_accl`, `mxa_manager`)
+   staged on a runner matched to a train's base system, so a release built
+   for another train is refused, with a warning naming it, even when its
+   kernel matches.
 
+A release published before the `Target kernel` row existed is matched the
+old way, by exact TrueNAS version; a release that advertises a different
+kernel never is. A stable box never installs a preview (BETA/RC) build,
+whatever its prerelease flag says: the tag or the notes header decides.
 There is no fallback to an unverified build, on stable or on preview boxes.
-With nothing approved, `get.sh` stops, lists the builds waiting for a
-hardware test, and links the open hardware-test issues.
+With nothing approved for the kernel, `get.sh` stops, lists the builds
+waiting for a hardware test, and links the open hardware-test issues.
 
 **Script-only modes** (`--check`, `--help`, `--uninstall`, or passing your own
 `memryx.raw`) run a release's scripts without installing its image, so they
 accept the newest approved release built for this box's **own train** when
-this TrueNAS version has none. They never take a release built for another
+this kernel has none. They never take a release built for another
 train, grandfathered or not: another train's `--check` inspects a different
 install layout and its `restore.sh` runs a different removal flow. Pin one
 with `--release=TAG` to use it anyway.
 
 ## Install
 
-Detect the TrueNAS version and train, download the approved build, verify the
-checksum, and run that release's installer:
+Detect the kernel, TrueNAS version and train, download the approved build,
+verify the checksum, and run that release's installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash
@@ -58,7 +72,8 @@ skipping the selection:
 curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash -s -- --release=<tag>
 ```
 
-Install a specific local image:
+Install a specific local image (`install.sh` refuses an image built for
+another kernel before changing anything; the module could never load):
 
 ```bash
 curl -fSL https://github.com/truenas-community-sysexts/memryx-mx3-support/releases/download/<tag>/memryx.raw -o /tmp/memryx.raw
@@ -100,17 +115,22 @@ and the PREINIT boot result. Each failure includes a one-line hint.
 
 ## What install does
 
-1. **Resolves the persistent pool** and copies `memryx.raw` to
-   `/mnt/<pool>/.config/memryx/memryx.raw` (the single activated copy — never
-   under `/usr`, which a TrueNAS update wipes).
-2. **Activates the sysext**: symlinks `/run/extensions/memryx.raw` → the pool
+1. **Checks the image's kernel**: the image must hold a
+   `usr/lib/modules/<kernel>` directory for the running kernel, or the
+   install stops before anything on the system changes.
+2. **Resolves the persistent pool** and writes `memryx.raw` to
+   `/mnt/<pool>/.config/memryx/memryx.raw`, the single activated copy (never
+   under `/usr`, which a TrueNAS update wipes). On a reinstall that file is
+   the live, loop-mounted image, so the new one is staged as
+   `memryx.raw.new` beside it and renamed over it, never rewritten in place.
+3. **Activates the sysext**: symlinks `/run/extensions/memryx.raw` → the pool
    copy, `systemd-sysext refresh`, `ldconfig` (so the new `libmemx`/`mx_accl`
    sonames resolve).
-3. **Loads the kernel module** via `insmod` (`/lib/modules` is read-only, so
+4. **Loads the kernel module** via `insmod` (`/lib/modules` is read-only, so
    `modprobe`/`depmod` can't be used) and reloads udev for `/dev/memx0`.
-4. **Starts the `mxa-manager` daemon** (`systemctl restart mxa-manager`), which
+5. **Starts the `mxa-manager` daemon** (`systemctl restart mxa-manager`), which
    creates `/run/mxa_manager`.
-5. **Registers a PREINIT script** via `midclt initshutdownscript.create` so the
+6. **Registers a PREINIT script** via `midclt initshutdownscript.create` so the
    sysext + module + daemon come back on every boot, before apps start.
 
 ## Persistent layout

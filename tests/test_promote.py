@@ -211,14 +211,14 @@ class PreviewSignOff(unittest.TestCase):
     def test_before_the_marker_selection_refuses_it_and_after_it_takes_it(self):
         from test_release_selection import run_selection
         rels = preview_rels()
-        p = run_selection(rels, "26.0.0-BETA.3")
+        p = run_selection(rels, "26.0.0-BETA.3", K42)
         self.assertNotEqual(p.returncode, 0)
         out = close(issue(R15, **PREVIEW_ISSUE), rels)
         rels = apply(rels, out["updates"][0])
-        p = run_selection(rels, "26.0.0-BETA.3")
+        p = run_selection(rels, "26.0.0-BETA.3", K42)
         self.assertEqual(p.stdout, R15)
         # A full release now, but a 25.10 box is not affected.
-        p = run_selection(rels, "25.10.7")
+        p = run_selection(rels, "25.10.7", K105)
         self.assertNotEqual(p.returncode, 0)
 
 

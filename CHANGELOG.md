@@ -6,6 +6,20 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **Kernel-keyed releases.** A sysext's kernel module binds to the exact
+  kernel string (`uname -r`), and TrueNAS point releases often ship the same
+  kernel, so one build covers every version on that kernel. Ported from the
+  sibling hailo8-support and coral-pcie-support repos.
+  - The README supported-versions table is keyed by kernel: one row per
+    known stable kernel with the range of TrueNAS versions shipping it,
+    including kernels with no build yet ("not built yet") and builds still
+    waiting for their hardware test. Rows only name a release built for
+    their own train. The new `.github/scripts/gen-kernel-map.py` maintains
+    `.github/kernel-map.json` (TrueNAS version to kernel, read from each
+    release's `rootfs.mtree` on `download.truenas.com`, cached, with the
+    cached trains kept when the train listing comes back empty), and
+    `update-supported-versions.yml` refreshes both and paginates the
+    releases.
 - **Per-train approval, and a `get.sh` bootstrap.** A hardware test now approves
   a build for the TrueNAS train it was built for, and nothing unapproved is ever
   installed.

@@ -70,7 +70,7 @@ The table below is generated from this repo's **actual published releases**, so 
 
 ### Prerequisites
 
-- A supported TrueNAS SCALE version (25.x stable or 26 beta) on amd64 — see [Supported TrueNAS versions](#supported-truenas-versions) above; the installer auto-detects yours
+- A supported TrueNAS SCALE version (25.x stable or 27 RC) on amd64 — see [Supported TrueNAS versions](#supported-truenas-versions) above; the installer auto-detects yours
 - MemryX MX3 installed and visible: `lspci -d 1fe9:` (MemryX vendor ID `1fe9`)
 - Root/sudo access
 - Internet access (to download the release)

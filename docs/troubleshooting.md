@@ -29,7 +29,10 @@ working. To recover:
    `ls /usr/lib/modules/*/extra/memx_cascade_plus_pcie.ko`.
 3. Re-run the installer. It reads the running kernel and installs the
    approved build for it, whichever TrueNAS version that build was made
-   for (the release notes record its `Target kernel`):
+   for. Releases are tagged by kernel (`k<kernel>-memryx<sdk>-r<run>`, e.g.
+   `k6.12.105-...` for kernel `6.12.105-production+truenas`); older ones use
+   `v<truenas>-...` tags, and either way the release notes record the exact
+   `Target kernel`:
    ```bash
    curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash
    ```

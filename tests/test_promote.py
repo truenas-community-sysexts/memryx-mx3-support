@@ -263,6 +263,58 @@ class Guards(unittest.TestCase):
         self.assertIn("Cannot tell which TrueNAS train", out["comments"][0])
 
 
+class KernelKeyedTags(unittest.TestCase):
+    """k<kernel>-memryx<sdk>-r<run> tags name no TrueNAS version: the train
+    comes from the notes header alone, and Latest ranks both tag schemes by
+    the run number."""
+
+    K52 = "6.18.52-production+truenas"
+    R16 = "v27.0.0-RC.1-memryx2.1-r16"
+    R17 = "k6.12.105-memryx2.1-r17"
+    R18 = "k6.18.52-memryx2.1-r18"
+
+    def test_stable_ktag_takes_its_train_from_the_header(self):
+        rels = [release(self.R17, "25.10.7", kver=K105, prerelease=True)]
+        out = close(issue(self.R17, **STABLE_ISSUE), rels)
+        up = out["updates"][0]
+        self.assertIs(up["prerelease"], False)
+        self.assertTrue(up["body"].endswith(f"\n\n{marker('25.10')}\n"))
+        self.assertIn("boxes running its kernel", out["comments"][0])
+
+    def test_preview_ktag_takes_its_preview_train(self):
+        rels = [release(self.R18, "27.0.0-RC.1", "Halfmoon", kver=self.K52,
+                        prerelease=True)]
+        out = close(issue(self.R18, **PREVIEW_ISSUE), rels)
+        up = out["updates"][0]
+        self.assertIs(up["prerelease"], False)
+        self.assertIn(marker("27"), up["body"])
+        self.assertNotIn("verified-train: 27.0", up["body"])
+
+    def test_ktag_without_a_header_changes_nothing(self):
+        rels = [dict(release(self.R17, kver=K105, prerelease=True),
+                     body=f"| Target kernel | `{K105}` |\n")]
+        out = close(issue(self.R17, **STABLE_ISSUE), rels)
+        self.assertEqual(out["updates"], [])
+        self.assertIn("Cannot tell which TrueNAS train", out["comments"][0])
+
+    def test_ktag_build_takes_latest_from_an_older_vtag(self):
+        rels = [release(self.R17, "25.10.7", kver=K105, prerelease=True,
+                        published="2026-10-07T00:00:00Z"),
+                release(self.R16, "27.0.0-RC.1", "Halfmoon", kver=self.K52,
+                        verified=["27"], published="2026-10-06T19:57:20Z")]
+        out = close(issue(self.R17, **STABLE_ISSUE), rels)
+        self.assertEqual(out["updates"][0]["make_latest"], "true")
+
+    def test_late_vtag_sign_off_does_not_take_latest_from_a_ktag(self):
+        rels = [release(R14, "25.10.7", kver=K105, prerelease=True,
+                        published="2026-09-03T10:59:34Z"),
+                release(self.R17, "25.10.7", kver=K105, verified=["25.10"],
+                        published="2026-10-07T00:00:00Z")]
+        out = close(issue(R14, **STABLE_ISSUE), rels)
+        self.assertEqual(out["updates"][0]["make_latest"], "false")
+        self.assertIn(f"Latest stays on the newer `{self.R17}`", out["comments"][0])
+
+
 class Trigger(unittest.TestCase):
     def test_job_runs_for_both_labels_on_completed_only(self):
         text = PROMOTE_YML.read_text()

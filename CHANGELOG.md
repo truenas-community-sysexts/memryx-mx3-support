@@ -36,6 +36,23 @@ All notable changes to this project are documented here.
     match the running kernel before changing anything, and replaces the
     live pool image by staging `memryx.raw.new` and renaming it over the old
     one instead of rewriting the loop-mounted file in place.
+  - Builds are released per kernel: `build.yml` tags
+    `k<kernel>-memryx<sdk>-r<run>` (e.g. `k6.12.105-memryx2.1-r17`), titles
+    the release `Kernel <kernel> (TrueNAS <version>) - MemryX SDK <sdk>
+    (r<run>)`, ships a `memryx.kver` asset, and keeps the notes header and
+    `Target kernel` row every parser reads (pinned by
+    `tests/test_notes_contract.py`). The publish step classifies the build
+    once (k-tags carry no BETA marker) and retries; the hardware-test issue
+    takes its label from it and names the kernel and train the build
+    serves. Older `v<truenas>-...` releases keep their tags.
+  - `check-releases.yml` resolves a new stable version's kernel from its
+    `rootfs.mtree` and skips the build when a release for that kernel and
+    SDK is already served on the version's train
+    (`.github/scripts/check-kernel-coverage.py`). A build still awaiting its
+    hardware test also skips the build but holds the tracked version back.
+    Coverage only counts once the Latest release is a k-tag (the older
+    one-liner runs Latest's installer); preview and cross-train builds never
+    count. `promote.yml` takes a k-tag build's train from its notes header.
 - **Per-train approval, and a `get.sh` bootstrap.** A hardware test now approves
   a build for the TrueNAS train it was built for, and nothing unapproved is ever
   installed.

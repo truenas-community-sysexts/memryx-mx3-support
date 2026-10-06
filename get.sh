@@ -435,7 +435,7 @@ main() {
             --uninstall) mode=uninstall ;;
             --release=*)
                 tag="${arg#*=}"
-                [ -n "$tag" ] || { echo "ERROR: --release= needs a tag, e.g. --release=v26.0.0-BETA.3-memryx2.1-r15" >&2; exit 2; }
+                [ -n "$tag" ] || { echo "ERROR: --release= needs a tag, e.g. --release=k6.12.105-memryx2.1-r17" >&2; exit 2; }
                 ;;
             --repo=*)
                 REPO="${arg#*=}"

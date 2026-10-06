@@ -9,10 +9,12 @@ name: Promote release on hardware-test sign-off
 #   - `<!-- verified-train: KEY -->` is appended to the release notes, once.
 #     KEY is the train of the TrueNAS version in the notes header ("for
 #     TrueNAS SCALE <version>"): the major from 26 on, major.minor before
-#     that. get.sh and install.sh install a build on a train only when its
-#     notes carry that train's marker, or when it is a full release with no
-#     marker at all (promoted before per-train sign-off, approved for every
-#     train);
+#     that. Kernel-keyed tags (k<kernel>-memryx<sdk>-r<run>) name no TrueNAS
+#     version, so the header is the one place every build names its train.
+#     get.sh and install.sh install a build on a train only when its notes
+#     carry that train's marker, or when it is a full release with no marker
+#     at all (promoted before per-train sign-off, approved for every train),
+#     and only on the kernel it was built for;
 #   - the prerelease becomes a full release, stable and preview builds
 #     alike: a build that passed a hardware test is a release, whichever
 #     train it was tested on. It gets a changelog (GitHub's PR-based
@@ -92,9 +94,10 @@ jobs:
             // Latest is the newest signed-off build on any train, by build
             // order: the run number build.yml puts at the end of every tag
             // (-r<N>, from one monotonic counter for stable and preview
-            // builds alike), then publication date for tags without one. A
-            // build signed off late (an older TrueNAS version, or a 25.10
-            // build after a 27 one) therefore never moves Latest backwards.
+            // builds and for both tag schemes, v<version>- and k<kernel>-),
+            // then publication date for tags without one. A build signed off
+            // late (an older kernel, or a 25.10 build after a 27 one)
+            // therefore never moves Latest backwards.
             // (GitHub's make_latest:'legacy' picks by date, which would
             // wrongly favour a just-promoted older build, so compare
             // explicitly.)
@@ -162,7 +165,8 @@ jobs:
             if (previewVer(bodyVer)) preview = true;
 
             // The train this build was made for: the TrueNAS version in the
-            // notes header (the tag names it too).
+            // notes header. A v-tag names it too; a k-tag names only the
+            // kernel, so for those the header is the only source.
             const builtFor = bodyVer || ((tag.match(/^v(.+?)-memryx/) || [])[1] || '');
             const train = trainKey(builtFor);
             const link = `[\`${tag}\`](${release.html_url})`;
@@ -246,5 +250,5 @@ jobs:
               ? 'and set it as the latest release'
               : `as a full release (Latest stays on the newer \`${newest}\`)`;
             await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
-              body: `Verified on TrueNAS ${builtFor}: promoted ${link} ${latestNote}, and appended the changelog. It is approved for TrueNAS train \`${train}\`, so get.sh and install.sh install it on train \`${train}\` boxes running its TrueNAS version.` });
+              body: `Verified on TrueNAS ${builtFor}: promoted ${link} ${latestNote}, and appended the changelog. It is approved for TrueNAS train \`${train}\`, so get.sh and install.sh install it on train \`${train}\` boxes running its kernel.` });
             core.info(`Promoted ${tag} (make_latest=${makeLatest}), approved for train ${train}.`);

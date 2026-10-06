@@ -8,11 +8,19 @@ For the quick path, see the [README](../README.md#quick-start).
 Each release ships:
 
 - `memryx.raw` + `memryx.raw.sha256` — the sysext image and its checksum
+- `memryx.kver`: the exact kernel the image targets, one line, for tooling
+  (the installers read the release notes' `Target kernel` row instead, the one
+  key every release has)
 - `install.sh`, `restore.sh`, `uninstall.sh`, `memryx-lib.sh` — the install-side
   scripts
 
-Release tags encode the versions: `v<truenas>-memryx<sdk>-r<run>` (e.g.
-`v25.10.4-memryx2.1-r12`).
+Release tags encode the kernel the build targets and the MemryX SDK:
+`k<kernel>-memryx<sdk>-r<run>` (e.g. `k6.12.105-memryx2.1-r17`, the kernel
+cut at its first `-`). One build serves every TrueNAS version of its train
+that ships that kernel. Releases published before kernel-keyed builds keep
+their `v<truenas>-memryx<sdk>-r<run>` tags (e.g. `v25.10.4-memryx2.1-r12`);
+both install the same way. The README supported versions table maps each
+kernel to the TrueNAS versions shipping it and the release serving them.
 
 ## Which release gets installed
 

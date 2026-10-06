@@ -774,7 +774,7 @@ for arg in "$@"; do
             ;;
         --release=*)
             RELEASE_TAG="${arg#*=}"
-            [ -n "$RELEASE_TAG" ] || { echo "ERROR: --release= requires a release tag (e.g., --release=v25.10.4-memryx2.1-r6)" >&2; exit 2; }
+            [ -n "$RELEASE_TAG" ] || { echo "ERROR: --release= requires a release tag (e.g., --release=k6.12.105-memryx2.1-r17)" >&2; exit 2; }
             ;;
         --check) CHECK_MODE=1 ;;
         --dry-run) DRY_RUN=1 ;;
@@ -955,11 +955,12 @@ fi
 
 if [ -n "$RELEASE_TAG" ]; then
     # Extract the MemryX SDK version from the tag for informational purposes.
-    # Tags look like: v25.10.4-memryx2.1-r1
+    # Tags look like k6.12.105-memryx2.1-r17 (kernel-keyed) or, before the
+    # kernel-keyed migration, v25.10.4-memryx2.1-r1.
     MEMRYX_SDK_VERSION=$(echo "$RELEASE_TAG" | sed -n 's/.*memryx\([0-9][0-9.]*[0-9]\).*/\1/p')
     if [ -z "$MEMRYX_SDK_VERSION" ]; then
         echo "ERROR: Could not parse MemryX SDK version from release tag '${RELEASE_TAG}'." >&2
-        echo "  Expected format: v<truenas>-memryx<sdk>-r<run>" >&2
+        echo "  Expected format: k<kernel>-memryx<sdk>-r<run> (or legacy v<truenas>-memryx<sdk>-r<run>)" >&2
         exit 1
     fi
     echo "MemryX SDK version: ${MEMRYX_SDK_VERSION}"

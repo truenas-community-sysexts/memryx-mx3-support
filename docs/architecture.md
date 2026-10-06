@@ -71,8 +71,8 @@ items that need confirmation on the first real hardware run.
 │  7. mksquashfs → memryx.raw (zstd, -all-root)                 │
 │  8. Smoke-test the squashfs contents (paths + ELF + vermagic) │
 ├──────────────────────────────────────────────────────────────┤
-│ release:  draft → prerelease (gate) or Latest (override),     │
-│           open a hardware-test issue for auto-builds          │
+│ release:  tag k<kernel>-memryx<sdk>-r<run>, draft, publish as │
+│           a prerelease, open a hardware-test issue            │
 └──────────────────────────────────────────────────────────────┘
 ```
 

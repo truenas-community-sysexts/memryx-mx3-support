@@ -161,11 +161,13 @@ repo = os.environ.get('REPO', '')
 # below.
 scripts_only = os.environ.get('MODE', 'install') == 'scripts'
 # Channel gate: a BETA/RC box is on the preview channel and may install
-# prereleases (preview builds are never promoted). A stable box only installs
-# promoted (non-prerelease) builds: an unverified stable build stays a
-# prerelease until a human closes its hardware-test issue, and auto-installing
-# one would bypass that gate. On both channels the approval gate below also
-# applies: no unverified build is installed, not even on a preview box.
+# preview builds, full releases or prereleases (preview builds signed off
+# before 2026-10-06 stayed prereleases). A stable box only installs promoted
+# (non-prerelease) builds and never a preview build, whatever its flag: an
+# unverified stable build stays a prerelease until a human closes its
+# hardware-test issue, and auto-installing one would bypass that gate. On
+# both channels the approval gate below also applies: no unverified build is
+# installed, not even on a preview box.
 vu = version.upper()
 is_preview = ('-BETA' in vu) or ('-RC' in vu)
 hdr_re = re.compile(r'for TrueNAS SCALE (\S+)')

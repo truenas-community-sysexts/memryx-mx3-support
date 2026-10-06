@@ -1,10 +1,10 @@
 """Run promote.yml's github-script under node with a stub GitHub client.
 
 Each test closes a hardware-test issue against a canned release list and
-checks the release update and issue comment the workflow would make:
-stable sign-offs promote as before (Latest by version) and add the
-verified-train marker in the same update, preview sign-offs add the marker
-only, and a second close changes nothing."""
+checks the release update and issue comment the workflow would make: a
+sign-off on any train (stable or preview) makes a full release and adds the
+verified-train marker in the same update, Latest goes to the newest
+signed-off build by build order, and a second close changes nothing."""
 import copy
 import json
 import subprocess
@@ -123,21 +123,21 @@ class StableSignOff(unittest.TestCase):
         self.assertIn("promoted", out["comments"][0])
         self.assertIn("approved for TrueNAS train `25.10`", out["comments"][0])
 
-    def test_latest_stays_on_the_newer_stable_version(self):
-        # Promoting an older build does not take Latest from a newer promoted
-        # one.
-        rels = [release("v25.10.3.1-memryx2.1-r20", "25.10.3.1", kver=K95,
+    def test_latest_stays_on_a_newer_build(self):
+        # Promoting an older build (lower run) does not take Latest from a
+        # newer signed-off one.
+        rels = [release("v25.10.3.1-memryx2.1-r3", "25.10.3.1", kver=K95,
                         prerelease=True, published="2026-09-20T00:00:00Z"),
                 release(R6, "25.10.4", kver=K99, published="2026-06-14T03:40:29Z")]
-        out = close(issue("v25.10.3.1-memryx2.1-r20", **STABLE_ISSUE), rels)
+        out = close(issue("v25.10.3.1-memryx2.1-r3", **STABLE_ISSUE), rels)
         up = out["updates"][0]
         self.assertEqual(up["make_latest"], "false")
         self.assertIn(marker("25.10"), up["body"])
-        self.assertIn("Latest stays on the newer `25.10.4`", out["comments"][0])
+        self.assertIn(f"Latest stays on the newer `{R6}`", out["comments"][0])
 
-    def test_a_beta_release_never_blocks_a_stable_promotion(self):
-        # v26.0.0-BETA.3-... parses as version 26.0.0, which would outrank
-        # every 25.x stable version if preview releases were not excluded.
+    def test_an_unpromoted_beta_never_blocks_a_stable_promotion(self):
+        # A prerelease has not been signed off, so it never holds Latest,
+        # even with a higher run number.
         rels = preview_rels()
         out = close(issue(R14, **STABLE_ISSUE), rels)
         self.assertEqual(out["updates"][0]["make_latest"], "true")
@@ -169,27 +169,44 @@ class StableSignOff(unittest.TestCase):
 
 
 class PreviewSignOff(unittest.TestCase):
-    def test_adds_the_marker_only(self):
+    def test_promotes_like_a_stable_build(self):
         rels = preview_rels()
         out = close(issue(R15, **PREVIEW_ISSUE), rels)
         self.assertEqual(len(out["updates"]), 1, out)
         up = out["updates"][0]
-        self.assertNotIn("prerelease", up)  # stays a prerelease
-        self.assertEqual(up["make_latest"], "false")
-        self.assertEqual(up["body"], rels[0]["body"] + f"\n\n{marker('26')}\n")
-        self.assertEqual(out["generated"], [])
+        self.assertIs(up["prerelease"], False)
+        self.assertEqual(up["make_latest"], "true")  # newest build (r15)
+        self.assertEqual(up["body"].count("## Changelog"), 1)
+        self.assertTrue(up["body"].endswith(f"\n\n{marker('26')}\n"))
         self.assertIn("approved for TrueNAS train `26`", out["comments"][0])
-        self.assertIn("never promoted to Latest", out["comments"][0])
 
-    def test_any_preview_signal_means_marker_only(self):
-        # Mislabeled as a stable test: the preview-build marker, the BETA
-        # tag, or the notes header each keep it from being promoted.
+    def test_every_preview_signal_gives_the_preview_train(self):
+        # Mislabeled as a stable test, a preview build is still approved for
+        # its own (preview) train only, taken from the notes header.
         rels = preview_rels()
         for iss in (issue(R15, labels=("hardware-test",), preview=True),
                     issue(R15, labels=("hardware-test",))):
             out = close(iss, rels)
-            self.assertNotIn("prerelease", out["updates"][0], iss)
+            self.assertIs(out["updates"][0]["prerelease"], False, iss)
             self.assertIn(marker("26"), out["updates"][0]["body"])
+            self.assertNotIn(marker("25.10"), out["updates"][0]["body"])
+
+    def test_changelog_starts_at_the_previous_preview_release(self):
+        older = "v26.0.0-BETA.2-memryx2.1-r9"
+        rels = preview_rels() + [release(older, "26.0.0-BETA.2", "Halfmoon",
+                                         kver=K42, verified=["26"],
+                                         published="2026-06-26T03:00:00Z")]
+        out = close(issue(R15, **PREVIEW_ISSUE), rels)
+        self.assertEqual(out["compared"], [f"{older}...{R15}"])
+
+    def test_full_preview_release_without_a_marker_gets_one(self):
+        rels = [release(R15, "26.0.0-BETA.3", "Halfmoon", kver=K42,
+                        published="2026-09-19T00:23:19Z")]
+        out = close(issue(R15, **PREVIEW_ISSUE), rels)
+        up = out["updates"][0]
+        self.assertNotIn("prerelease", up)
+        self.assertEqual(up["make_latest"], "false")
+        self.assertEqual(up["body"], rels[0]["body"] + f"\n\n{marker('26')}\n")
 
     def test_before_the_marker_selection_refuses_it_and_after_it_takes_it(self):
         from test_release_selection import run_selection
@@ -200,7 +217,7 @@ class PreviewSignOff(unittest.TestCase):
         rels = apply(rels, out["updates"][0])
         p = run_selection(rels, "26.0.0-BETA.3")
         self.assertEqual(p.stdout, R15)
-        # And a 25.10 box is not affected.
+        # A full release now, but a 25.10 box is not affected.
         p = run_selection(rels, "25.10.7")
         self.assertNotEqual(p.returncode, 0)
 

@@ -9,23 +9,65 @@ sudo ./install.sh --check
 
 ## `/dev/memx0` does not appear after a TrueNAS update
 
-After a TrueNAS upgrade the running kernel changes, and the sysext logs an
-insmod failure: `memx_cascade_plus_pcie` is compiled against an exact kernel
-version, so a module built for the old kernel won't load on the new one.
+When a TrueNAS update changes the kernel, the boot-time PREINIT script logs
+the mismatch and the module does not load:
 
-This is **expected** on a TrueNAS upgrade, not a bug. To recover:
+```
+[memryx-preinit] ERROR: Kernel version mismatch: running <new-kver> but sysext has a module for <old-kver>
+[memryx-preinit] ERROR: TrueNAS was likely updated. Download a new memryx.raw release matching <new-kver>
+[memryx-preinit] ERROR: Visit https://github.com/<repo>/releases
+```
+
+`memx_cascade_plus_pcie` is compiled against an exact kernel version, so a
+module built for the old kernel won't load on the new one. This is
+**expected** on a TrueNAS upgrade that moves the kernel, not a bug. Many
+point releases keep the kernel, and on those the installed build keeps
+working. To recover:
 
 1. Check the running kernel: `uname -r`.
 2. Check what the sysext shipped:
    `ls /usr/lib/modules/*/extra/memx_cascade_plus_pcie.ko`.
-3. Install a `memryx.raw` release built for the new kernel. Releases are tagged
-   `v<truenas>-memryx<sdk>-r<run>`; the release notes record the target kernel.
-   Re-run `install.sh` — it auto-detects the new TrueNAS version and fetches the
-   matching build.
+3. Re-run the installer. It reads the running kernel and installs the
+   approved build for it, whichever TrueNAS version that build was made
+   for. Releases are tagged by kernel (`k<kernel>-memryx<sdk>-r<run>`, e.g.
+   `k6.12.105-...` for kernel `6.12.105-production+truenas`); older ones use
+   `v<truenas>-...` tags, and either way the release notes record the exact
+   `Target kernel`:
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/truenas-community-sysexts/memryx-mx3-support/main/get.sh | sudo bash
+   ```
 
-If no matching release exists yet, the daily `check-releases` workflow will
-produce one once the new TrueNAS version is published; or trigger `build.yml`
-manually with the new `truenas_version`.
+If no build for the new kernel exists yet, the daily `check-releases`
+workflow produces one once the new TrueNAS version is published; or trigger
+`build.yml` manually with the new `truenas_version`. If a build exists but is
+still waiting for its hardware test, see the next section.
+
+## No approved build for your kernel yet
+
+The installer only installs a build that a hardware test approved for your
+TrueNAS train (see [Which release gets installed](install.md#which-release-gets-installed)).
+A new build is a pre-release with an open hardware-test issue until someone
+verifies it on real hardware, so for a while the installer stops with:
+
+```
+No approved stable release found for kernel <kver> (TrueNAS <version>).
+Only a release approved for TrueNAS train <train> is installed: a hardware test on
+that train signed it off, or it was promoted before per-train sign-off.
+A build for kernel <kver> exists but is a prerelease awaiting hardware-test
+promotion; re-run this installer once it is promoted.
+Builds waiting for a hardware test:
+  <tag> (prerelease)
+Open hardware-test issues for these builds, waiting for a tester:
+  #<n> <issue title>
+  <issue url>
+```
+
+The issue is the one step left: once a tester closes it as completed, the
+same one-liner installs the build. If you have the hardware, the issue body
+lists the exact test steps; testing it yourself and reporting back is the
+fastest way to get it approved. Installing it before then is possible by hand
+(the issue's steps, or `get.sh` with `--release=<tag>`), but it is untested
+on your train.
 
 ## `/dev/memx0` exists but Frigate can't use the MX3
 

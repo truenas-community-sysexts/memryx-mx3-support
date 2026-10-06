@@ -6,6 +6,53 @@ All notable changes to this project are documented here.
 
 ### Added
 
+- **Kernel-keyed releases.** A sysext's kernel module binds to the exact
+  kernel string (`uname -r`), and TrueNAS point releases often ship the same
+  kernel, so one build covers every version on that kernel. Ported from the
+  sibling hailo8-support and coral-pcie-support repos.
+  - The README supported-versions table is keyed by kernel: one row per
+    known stable kernel with the range of TrueNAS versions shipping it,
+    including kernels with no build yet ("not built yet") and builds still
+    waiting for their hardware test. Rows only name a release built for
+    their own train. The new `.github/scripts/gen-kernel-map.py` maintains
+    `.github/kernel-map.json` (TrueNAS version to kernel, read from each
+    release's `rootfs.mtree` on `download.truenas.com`, cached, with the
+    cached trains kept when the train listing comes back empty), and
+    `update-supported-versions.yml` refreshes both and paginates the
+    releases.
+  - `get.sh`, `install.sh`, `uninstall.sh` and `restore.sh` select by the
+    running kernel: a release's `Target kernel` notes row must equal
+    `uname -r` (a `k<kernel>-...` tag whose notes lost the row matches by
+    its tag, promoted only). A box on a version that never had a build of
+    its own gets the build for its kernel. The **train guard** serves a
+    kernel match only from the box's own train, since the userspace is
+    staged against that train's base system; a refused cross-train match is
+    named in a warning. Releases without a kernel row fall back to the exact
+    TrueNAS version. The channel gate (a stable box never installs a BETA/RC
+    build, by tag or notes header) and the approval gate are unchanged, and
+    the no-match message still names the waiting hardware-test issues. The
+    shared block stays a verbatim copy in all four scripts.
+  - `install.sh` refuses an image whose `usr/lib/modules/<kernel>` does not
+    match the running kernel before changing anything, and replaces the
+    live pool image by staging `memryx.raw.new` and renaming it over the old
+    one instead of rewriting the loop-mounted file in place.
+  - Builds are released per kernel: `build.yml` tags
+    `k<kernel>-memryx<sdk>-r<run>` (e.g. `k6.12.105-memryx2.1-r17`), titles
+    the release `Kernel <kernel> (TrueNAS <version>) - MemryX SDK <sdk>
+    (r<run>)`, ships a `memryx.kver` asset, and keeps the notes header and
+    `Target kernel` row every parser reads (pinned by
+    `tests/test_notes_contract.py`). The publish step classifies the build
+    once (k-tags carry no BETA marker) and retries; the hardware-test issue
+    takes its label from it and names the kernel and train the build
+    serves. Older `v<truenas>-...` releases keep their tags.
+  - `check-releases.yml` resolves a new stable version's kernel from its
+    `rootfs.mtree` and skips the build when a release for that kernel and
+    SDK is already served on the version's train
+    (`.github/scripts/check-kernel-coverage.py`). A build still awaiting its
+    hardware test also skips the build but holds the tracked version back.
+    Coverage only counts once the Latest release is a k-tag (the older
+    one-liner runs Latest's installer); preview and cross-train builds never
+    count. `promote.yml` takes a k-tag build's train from its notes header.
 - **Per-train approval, and a `get.sh` bootstrap.** A hardware test now approves
   a build for the TrueNAS train it was built for, and nothing unapproved is ever
   installed.

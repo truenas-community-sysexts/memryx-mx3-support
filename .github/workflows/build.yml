@@ -192,8 +192,10 @@ jobs:
     outputs:
       run_number: ${{ steps.build_id.outputs.run_number }}
       memryx_pkg_version: ${{ steps.userspace.outputs.memryx_pkg_version }}
-      # Exact kernel the module targets; the hardware-test issue tells the
-      # tester to confirm `uname -r` matches it before installing.
+      # The kernel keys the release: short_kver (6.12.105) goes into the tag
+      # and title, the exact real_kver into the hardware-test issue's
+      # `uname -r` pre-check.
+      short_kver: ${{ steps.kver.outputs.short_kver }}
       real_kver: ${{ steps.kver.outputs.real_kver }}
 
     steps:
@@ -452,6 +454,10 @@ jobs:
           fi
           echo "Real kernel version: ${REAL_KVER}"
           echo "REAL_KVER=${REAL_KVER}" >> "$GITHUB_ENV"
+          # Short form (6.12.105 from 6.12.105-production+truenas) keys the
+          # release tag; exposed as a step output so workflow expressions can
+          # reference it, mirroring the build_id pattern.
+          echo "short_kver=${REAL_KVER%%-*}" >> "$GITHUB_OUTPUT"
           echo "real_kver=${REAL_KVER}" >> "$GITHUB_OUTPUT"
 
           # Detect the GCC major version the kernel was compiled with.
@@ -860,6 +866,15 @@ jobs:
           sha256sum memryx.raw > memryx.raw.sha256
           cat memryx.raw.sha256
 
+      - name: Write kernel version asset
+        run: |
+          # memryx.kver ships with the release so tooling can key on the exact
+          # kernel without parsing the release notes. install.sh still parses
+          # the notes: they are the only key that exists on releases published
+          # before this asset (releases are immutable, no backfilling).
+          printf '%s\n' "${REAL_KVER}" > memryx.kver
+          cat memryx.kver
+
       - name: Render release notes
         env:
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
@@ -873,9 +888,16 @@ jobs:
           RUNNER_IMAGE: ${{ needs.resolve.outputs.runner }}
           BUILD_SHA: ${{ github.sha }}
           RUN_NUMBER: ${{ steps.build_id.outputs.run_number }}
+          SHORT_KVER: ${{ steps.kver.outputs.short_kver }}
           REPO: ${{ github.repository }}
         run: |
-          envsubst '${TRUENAS_VERSION} ${TRAIN_NAME} ${MEMRYX_SDK} ${MEMRYX_PKG_VERSION} ${DRIVER_REF} ${FIRMWARE_REF} ${DRIVER_REPO} ${APT_CHANNEL} ${REAL_KVER} ${RUNNER_IMAGE} ${BUILD_SHA} ${REPO} ${RUN_NUMBER}' > release-notes.md <<'RELEASE_NOTES'
+          # The header line ("... for TrueNAS SCALE <version> (<train>)") and
+          # the Target kernel row are parsed by the installers, the coverage
+          # gate, promote.yml and the supported-versions table: k-tags carry
+          # no TrueNAS version, so the header is where every build names the
+          # train it was built for. tests/test_notes_contract.py renders this
+          # heredoc and feeds it to every parser.
+          envsubst '${TRUENAS_VERSION} ${TRAIN_NAME} ${MEMRYX_SDK} ${MEMRYX_PKG_VERSION} ${DRIVER_REF} ${FIRMWARE_REF} ${DRIVER_REPO} ${APT_CHANNEL} ${REAL_KVER} ${RUNNER_IMAGE} ${BUILD_SHA} ${REPO} ${RUN_NUMBER} ${SHORT_KVER}' > release-notes.md <<'RELEASE_NOTES'
           ## MemryX MX3 Sysext for TrueNAS SCALE ${TRUENAS_VERSION} (${TRAIN_NAME})
 
           | Field | Value |
@@ -888,13 +910,15 @@ jobs:
           | Source commit | [`${BUILD_SHA}`](https://github.com/${REPO}/commit/${BUILD_SHA}) |
           | Frigate compatibility | [docker/memryx/user_installation.sh (dev)](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh) — pinned SDK: `${MEMRYX_SDK}` |
 
+          This build targets kernel `${REAL_KVER}` and loads on any TrueNAS ${TRAIN_NAME} release shipping that exact kernel, not only ${TRUENAS_VERSION}. The README supported versions table lists the covered versions.
+
           **Target Device:** MemryX MX3 M.2 AI accelerator (PCIe). Frigate's `memryx`
           detector connects to the host `mxa-manager` daemon over `/run/mxa_manager`
           and to `/dev/memx0`.
 
           > **Requirements (read these):** the card's firmware must be at
           > anti-rollback **cnt ≥ 6** (flash it on **bare metal** with
-          > `curl -fsSL https://github.com/${REPO}/releases/download/v${TRUENAS_VERSION}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash -s -- --update-firmware`;
+          > `curl -fsSL https://github.com/${REPO}/releases/download/k${SHORT_KVER}-memryx${MEMRYX_SDK}-r${RUN_NUMBER}/install.sh | sudo bash -s -- --update-firmware`;
           > it can't be flashed from inside a passthrough VM), and
           > Frigate must run as a **privileged** container with `device: PCIe:0`.
           > See the [README](https://github.com/${REPO}#using-with-frigate).
@@ -914,7 +938,7 @@ jobs:
           ```bash
           curl -fsSL https://raw.githubusercontent.com/${REPO}/main/get.sh | sudo bash
           ```
-          `get.sh` installs the newest build approved for your TrueNAS train and built for your TrueNAS version. This build qualifies once its hardware test signs it off for the train it was built for.
+          `get.sh` installs the newest build approved for your TrueNAS train and built for your running kernel. This build qualifies once its hardware test signs it off for the train it was built for.
 
           ### Verify
           ```bash
@@ -947,6 +971,7 @@ jobs:
           path: |
             memryx.raw
             memryx.raw.sha256
+            memryx.kver
             release-notes.md
 
   release:
@@ -968,12 +993,17 @@ jobs:
         id: release
         uses: softprops/action-gh-release@v3
         with:
-          tag_name: v${{ needs.resolve.outputs.truenas_version }}-memryx${{ needs.resolve.outputs.memryx_sdk }}-r${{ needs.build.outputs.run_number }}
-          name: "TrueNAS ${{ needs.resolve.outputs.truenas_version }} - MemryX SDK ${{ needs.resolve.outputs.memryx_sdk }} (r${{ needs.build.outputs.run_number }})"
+          # Keyed by kernel: one build serves every TrueNAS version shipping
+          # that kernel. The -r<run> suffix gives every invocation a unique
+          # tag, so nothing collides with GitHub's immutable-release tag-burn,
+          # and it orders builds for promote.yml's Latest decision.
+          tag_name: k${{ needs.build.outputs.short_kver }}-memryx${{ needs.resolve.outputs.memryx_sdk }}-r${{ needs.build.outputs.run_number }}
+          name: "Kernel ${{ needs.build.outputs.short_kver }} (TrueNAS ${{ needs.resolve.outputs.truenas_version }}) - MemryX SDK ${{ needs.resolve.outputs.memryx_sdk }} (r${{ needs.build.outputs.run_number }})"
           body_path: release-notes.md
           files: |
             memryx.raw
             memryx.raw.sha256
+            memryx.kver
             scripts/memryx-lib.sh
             scripts/install.sh
             scripts/restore.sh
@@ -984,29 +1014,65 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish the draft as a prerelease (hardware-test gate)
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           REL_ID: ${{ steps.release.outputs.id }}
+          TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
         run: |
+          # The hardware-test issue below is labelled by channel. k-tags carry
+          # no BETA marker, so this is the one place a build is classified.
+          IS_PREVIEW=false
+          case "$TRUENAS_VERSION" in
+            *-[Bb][Ee][Tt][Aa]*|*-[Rr][Cc]*) IS_PREVIEW=true ;;
+          esac
+          echo "is_preview=${IS_PREVIEW}" >> "$GITHUB_OUTPUT"
           # Every build publishes as a PRERELEASE, stable and preview alike,
           # and there is no way to publish one straight to Latest: a full
           # release with no verified-train marker counts as approved for
           # every train (the grandfather rule for builds promoted before
           # per-train sign-off), so it would reach every box untested. Only
           # promote.yml, on a closed hardware-test issue, approves a build.
-          gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" -F draft=false -F prerelease=true
+          PUBLISH_ARGS=(-F draft=false -F prerelease=true)
+          # Retry the publish PATCH: a transient API failure here would
+          # otherwise strand an invisible draft with attached assets, no
+          # hardware-test issue, and no surfaced error.
+          PUBLISHED=false
+          for ATTEMPT in 1 2 3; do
+            if gh api --method PATCH "repos/${REPO}/releases/${REL_ID}" "${PUBLISH_ARGS[@]}"; then
+              PUBLISHED=true
+              break
+            fi
+            if [ "$ATTEMPT" -lt 3 ]; then
+              echo "Publish attempt ${ATTEMPT} failed; retrying in $((ATTEMPT * 15))s"
+              sleep $((ATTEMPT * 15))
+            fi
+          done
+          if [ "$PUBLISHED" != "true" ]; then
+            # Keep the draft: a PATCH can succeed server-side with a dropped
+            # response, and a delete would then remove a published release
+            # while its tag survives. The assets stay recoverable.
+            echo "::error title=publish failed::could not publish draft release ${REL_ID} after 3 attempts; the draft and its assets are kept at https://github.com/${REPO}/releases. Publish it by hand, or delete it and re-run."
+            exit 1
+          fi
 
       - name: Create hardware-test issue for auto-build
+        # Every build gets one: nothing installs it until this issue is
+        # closed as completed.
         uses: actions/github-script@v9
         env:
           TRUENAS_VERSION: ${{ needs.resolve.outputs.truenas_version }}
+          TRAIN_NAME: ${{ needs.resolve.outputs.train_name }}
           MEMRYX_SDK: ${{ needs.resolve.outputs.memryx_sdk }}
-          RUN_NUMBER: ${{ needs.build.outputs.run_number }}
           REAL_KVER: ${{ needs.build.outputs.real_kver }}
+          # Same expression as the release step's tag_name (a unit test
+          # holds the two together).
+          RELEASE_TAG: k${{ needs.build.outputs.short_kver }}-memryx${{ needs.resolve.outputs.memryx_sdk }}-r${{ needs.build.outputs.run_number }}
+          IS_PREVIEW: ${{ steps.publish.outputs.is_preview }}
         with:
           script: |
-            const tag = `v${process.env.TRUENAS_VERSION}-memryx${process.env.MEMRYX_SDK}-r${process.env.RUN_NUMBER}`;
+            const tag = process.env.RELEASE_TAG;
             const releaseUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
 
             // A pre-release TrueNAS target (BETA/RC) is the preview channel.
@@ -1014,7 +1080,9 @@ jobs:
             // box the issue needs. Closing either kind as completed promotes
             // the build to a full release for its own train (promote.yml); the
             // installers still never put a preview build on a stable box.
-            const isPreview = /-(?:BETA|RC)\b/i.test(process.env.TRUENAS_VERSION);
+            // Classified once, by the publish step; this step must agree with
+            // how the release was actually published.
+            const isPreview = process.env.IS_PREVIEW === 'true';
             const label = isPreview ? 'preview-hardware-test' : 'hardware-test';
             const labelDescription = isPreview
               ? 'Preview (TrueNAS beta/RC) build awaiting hardware verification'
@@ -1063,6 +1131,7 @@ jobs:
             // downloaded to /var/tmp (survives the step 4 reboot, unlike /tmp)
             // so `install.sh --check` can be re-run from there after reboot.
             const tv = process.env.TRUENAS_VERSION;
+            const train = process.env.TRAIN_NAME;
             const sdk = process.env.MEMRYX_SDK;
             const kver = process.env.REAL_KVER || 'unknown (see the Target kernel row in the release notes)';
             const base = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/download/${tag}`;
@@ -1070,12 +1139,12 @@ jobs:
 
             const signOff = isPreview
               ? [
-                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog. Stable boxes never install a preview build. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
-                  `- Broken: comment what failed, then close as **not planned**.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on ${train} systems running kernel \`${kver}\`, and appends the changelog. Other trains never receive it, and stable boxes never install a preview build. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
+                  `- Broken: comment what failed, then close as **not planned**. Nothing is approved, so no system installs it.`,
                 ]
               : [
-                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on TrueNAS ${tv}, and appends the changelog. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
-                  `- Broken: comment what failed, then close as **not planned**. The release stays an unpromoted pre-release.`,
+                  `- Works: close this issue as **completed**. That promotes [\`${tag}\`](${releaseUrl}) to a full release, approves it for this TrueNAS train (a \`verified-train\` marker in its notes), so get.sh and install.sh serve it on ${train} systems running kernel \`${kver}\`, and appends the changelog. It becomes Latest if it is the newest signed-off build on any train (by build order).`,
+                  `- Broken: comment what failed, then close as **not planned**, so nothing is promoted, and delete the release: an unpromoted build keeps counting as pending coverage for its kernel and holds back a rebuild.`,
                 ];
 
             await github.rest.issues.create({
@@ -1091,13 +1160,13 @@ jobs:
                 `**Release:** [${tag}](${releaseUrl})`,
                 `<!-- release-tag: ${tag} -->`,
                 `<!-- preview-build: ${isPreview} -->`,
-                `**TrueNAS:** ${tv}`,
+                `**TrueNAS:** ${tv} (${train})`,
                 `**MemryX SDK:** ${sdk}`,
                 `**Target kernel:** \`${kver}\``,
                 ``,
                 `### Requirements`,
-                `- TrueNAS ${tv} running kernel \`${kver}\`, with a MemryX MX3 M.2 card (bare metal, or a VM with the card passed through).`,
-                `- The module is built for that exact kernel. install.sh does not check it: on any other kernel it installs anyway, the module never loads and \`--check\` fails. Stop at step 1 if \`uname -r\` does not match.`,
+                `- TrueNAS ${tv}, or any ${train} version running kernel \`${kver}\`, with a MemryX MX3 M.2 card (bare metal, or a VM with the card passed through). The installer serves this build to every ${train} version on that exact kernel.`,
+                `- The module is built for that exact kernel: install.sh refuses this image on any other kernel before changing anything. Stop at step 1 if \`uname -r\` does not match.`,
                 `- Card firmware at anti-rollback cnt >= 6. If \`acclBench -H\` in step 3 reports a nonsense chip count, run \`sudo bash install.sh --update-firmware\` from \`${dir}\` (bare metal only), power the host fully off and on, then retest.`,
                 `- Optional detector test: Frigate running privileged with \`/dev/memx0\`, \`/run/mxa_manager\` and detector \`device: PCIe:0\`.`,
                 ``,
@@ -1110,7 +1179,7 @@ jobs:
                 ``,
                 `### 2. Install this build`,
                 isPreview
-                  ? `Install this exact build from its tag (the default install picks the newest build for your TrueNAS version, which may be a different one):`
+                  ? `Install this exact build from its tag (the default install picks the newest approved build for your kernel, which may be a different one):`
                   : `It is a pre-release, so the default install skips it. Install it from its tag:`,
                 "```bash",
                 `BASE=${base}`,

@@ -40,7 +40,7 @@ REPO="${MEMRYX_REPO:-truenas-community-sysexts/memryx-mx3-support}"
 # script; tests/test_release_selection.py fails CI when the copies differ)
 
 # TrueNAS version of this box: the version string decides the release channel
-# (stable vs preview) and the train, and is matched against the release tags.
+# (stable vs preview) and the train. The running kernel picks the build.
 detect_truenas_version() {
     local v
     v=$(midclt call system.info | python3 -c "
@@ -58,8 +58,9 @@ except Exception as e:
 # Train key of a TrueNAS version: the major version from 26 on (26.0.0-BETA.3
 # and 26.1.2 are both train 26), major.minor before that (25.10.7 is 25.10,
 # 25.04.2.6 is 25.04). Fails on anything else. Copied verbatim from
-# nvidia-driver-support's get.sh; promote.yml's trainKey is held to it by
-# tests/test_promote.py.
+# nvidia-driver-support's get.sh; the selection's train_key applies the same
+# rule to the version in a release's notes header, and promote.yml's trainKey
+# is held to it by tests/test_promote.py.
 truenas_train_key() {
     local v="$1" major minor
     major="${v%%.*}"
@@ -77,9 +78,9 @@ truenas_train_key() {
 
 # Every page of the repo's releases, appended to $1 as one JSON array per
 # page. The oldest releases are exactly the ones a single newest-first page
-# drops once the repo outgrows it, and the scripts-only fallback needs them.
-# Only a full page can have more behind it; anything else (short page, API
-# error object) ends the loop, and the selection reports API errors.
+# drops once the repo outgrows it, and the version and scripts-only fallbacks
+# need them. Only a full page can have more behind it; anything else (short
+# page, API error object) ends the loop, and the selection reports API errors.
 fetch_release_pages() {
     local out="$1" page=1 page_json page_len
     : > "$out"
@@ -101,20 +102,20 @@ else:
     done
 }
 
-# The newest release approved for train $3 on a box running TrueNAS $2,
-# chosen from the release pages in $4. $1 is the mode: "install" (the image
-# is installed, so the release must be the one built for this exact TrueNAS
-# version) or "scripts" (only the release's scripts run: --check, --help,
-# uninstall, a user's own image; see the selection below). $5, when given, is
+# The newest release approved for train $4 on a box running TrueNAS $2 on
+# kernel $3, chosen from the release pages in $5. $1 is the mode: "install"
+# (the image is installed, so the release must be built for this kernel and
+# this train) or "scripts" (only the release's scripts run: --check, --help,
+# uninstall, a user's own image; see the selection below). $6, when given, is
 # a file holding the repo's open issues, so the no-match message can name the
 # hardware tests that are waiting. Prints the tag; explains on stderr and
 # fails when there is none (exit 3 when nothing is approved, 1 on an API or
 # parse error).
 select_approved_release() {
-    MODE="$1" VERSION="$2" TRAIN="$3" ISSUES_FILE="${5:-}" REPO="$REPO" python3 -c "
+    MODE="$1" VERSION="$2" KVER="$3" TRAIN="$4" ISSUES_FILE="${6:-}" REPO="$REPO" python3 -c "
 # BEGIN release-selection (extracted verbatim by tests/test_release_selection.py;
-# single-quoted strings only, no backticks and no dollar signs: this code lives
-# inside a double-quoted bash string)
+# single-quoted strings only, \x60 stands for backtick, no dollar signs: this
+# code lives inside a double-quoted bash string)
 import sys, json, os, re
 # stdin carries one JSON array per fetched API page, concatenated.
 decoder = json.JSONDecoder()
@@ -147,11 +148,13 @@ if not text.strip():
     print('Failed to parse GitHub API response', file=sys.stderr)
     sys.exit(1)
 version = os.environ['VERSION']
+kver = os.environ['KVER']
+# This box's train key, from truenas_train_key (same rule as train_key below).
 train = os.environ['TRAIN']
 repo = os.environ.get('REPO', '')
 # Scripts only (--check, --help, uninstall, a user's own image): no module
-# from the release is loaded, so a release built for another version of this
-# train serves when this version has no approved build. See the selection
+# from the release is loaded, so a release built for another kernel of this
+# train serves when this kernel has no approved build. See the selection
 # below.
 scripts_only = os.environ.get('MODE', 'install') == 'scripts'
 # Channel gate: a BETA/RC box is on the preview channel and may install
@@ -166,6 +169,9 @@ vu = version.upper()
 is_preview = ('-BETA' in vu) or ('-RC' in vu)
 hdr_re = re.compile(r'for TrueNAS SCALE (\S+)')
 def preview_release(release):
+    # Kernel-keyed tags (k6.18.52-...) carry no BETA marker, so the tag check
+    # alone does not cover new preview builds; the notes header still names
+    # the TrueNAS version they were built for.
     tu = release.get('tag_name', '').upper()
     if ('-BETA' in tu) or ('-RC' in tu):
         return True
@@ -177,8 +183,9 @@ def preview_release(release):
 # completed; the train is the one the build was made for. A release with a
 # line for this train is approved here; lines for other trains only are not.
 # A full release with no line at all was promoted before per-train sign-off
-# and is grandfathered for every train. Nothing else qualifies: there is no
-# fallback to an unverified build, on stable or preview boxes.
+# and is grandfathered for every train, unless it is a preview build. Nothing
+# else qualifies: there is no fallback to an unverified build, on stable or
+# preview boxes.
 vt_re = re.compile(r'^[ \t]*<!--\s*verified-train:\s*([^\s>]+?)\s*-->', re.M)
 def verified_trains(release):
     return set(vt_re.findall(release.get('body') or ''))
@@ -189,44 +196,73 @@ def approved(release):
     return not release.get('prerelease') and not preview_release(release)
 def published(release):
     return release.get('published_at') or release.get('created_at') or ''
-# The TrueNAS train a build was made for: the version in its notes header
-# (the tag names it too), keyed like truenas_train_key.
+def train_key(v):
+    major, dot, rest = v.partition('.')
+    if not major.isdigit():
+        return ''
+    if int(major) >= 26:
+        return major
+    minor = re.match(r'[0-9]*', rest).group(0)
+    return major + '.' + minor if dot and minor else ''
+# The TrueNAS train a build was made for: the version in its notes header (a
+# v-tag names it too, a k-tag does not), keyed like truenas_train_key.
 def built_train(release):
     m = hdr_re.search(release.get('body') or '')
     v = m.group(1) if m else ''
     if not v:
         tm = re.match(r'v(.+?)-memryx', release.get('tag_name', ''))
         v = tm.group(1) if tm else ''
-    major, dot, rest = v.partition('.')
-    if not major.isdigit():
-        return ''
-    if int(major) >= 26:
-        return major
-    minor = ''
-    for ch in rest:
-        if not ch.isdigit():
-            break
-        minor += ch
-    return major + '.' + minor if dot and minor else ''
-# The image is built against one TrueNAS version's kernel headers, so an
-# install still matches the tag to this box's exact version. The prefix is
-# the full version string, so a stable box can never match a BETA/RC release;
-# the prerelease and preview checks are the second lock on that.
-prefix = f'v{version}-'
+    return train_key(v)
+# Train guard: the sysext also ships userspace (libmemx, mx_accl,
+# mxa_manager) staged on a runner matched to a train's base system, so a
+# kernel match is only served from the box's own TrueNAS train. A release
+# whose train cannot be told (a k-tag whose notes lost their header) passes.
+def same_train(release):
+    bt = built_train(release)
+    return not bt or bt == train
+# The Target kernel notes row is the primary key. A k-tag whose body lost the
+# row still encodes its short kernel in the tag; check-releases counts such a
+# release as covering its kernel (and skips builds for it), so the installer
+# must serve it by the same rule. A body row always wins over the tag: it is
+# written from REAL_KVER at build time, so a tag/body mismatch means a
+# mispublished release that must not be served.
+ker_re = re.compile(r'Target kernel\s*\|\s*\x60([^\x60]+)\x60')
+def target_kernel(release):
+    m = ker_re.search(release.get('body') or '')
+    return m.group(1) if m else ''
+short = kver.split('-')[0]
+def kernel_match(release):
+    tk = target_kernel(release)
+    if tk:
+        return tk == kver
+    return release.get('tag_name', '').startswith(f'k{short}-memryx')
 candidates = [r for r in data
               if not r.get('draft')
               and (is_preview or (not r.get('prerelease') and not preview_release(r)))
               and approved(r)]
-if scripts_only:
-    # Only a release built for this box's own train serves, grandfathered or
-    # not: an older train's install.sh --check inspects another install
-    # layout, and its restore.sh runs another removal flow. The build for
-    # this TrueNAS version if it is approved, else the newest approved one of
-    # the train.
-    own = [r for r in candidates if built_train(r) == train]
-    matches = [r for r in own if r.get('tag_name', '').startswith(prefix)] or own
-else:
-    matches = [r for r in candidates if r.get('tag_name', '').startswith(prefix)]
+matches = [r for r in candidates if kernel_match(r) and same_train(r)]
+cross = [r for r in candidates if kernel_match(r) and not same_train(r)]
+for r in ([] if scripts_only else cross):
+    print('WARNING: ' + r.get('tag_name', '?') + ' matches kernel ' + kver
+          + ' but was built for a different TrueNAS train; not using it'
+          + ' (the MemryX userspace must match the train).', file=sys.stderr)
+if not matches:
+    # Releases published before the Target kernel row existed can only be
+    # matched the old way: exact TrueNAS version. Never fall back onto a
+    # release that DOES advertise a kernel: a version match with the wrong
+    # kernel would ship a module that cannot load.
+    prefix = f'v{version}-'
+    matches = [r for r in candidates
+               if r.get('tag_name', '').startswith(prefix) and not target_kernel(r)]
+    if matches:
+        print(f'NOTE: no release advertises kernel {kver}; matched by TrueNAS version instead.', file=sys.stderr)
+if not matches and scripts_only:
+    # With no approved build for this kernel (a box on an untested kernel,
+    # say), the scripts of the newest approved release BUILT FOR THIS TRAIN
+    # serve. Never another train's, grandfathered or not: an older train's
+    # install.sh --check inspects another install layout, and its restore.sh
+    # runs another removal flow.
+    matches = [r for r in candidates if built_train(r) == train]
 if not matches:
     channel = 'preview (beta)' if is_preview else 'stable'
     if scripts_only:
@@ -234,19 +270,19 @@ if not matches:
         print('Its scripts are needed here, and a release built for another train does not', file=sys.stderr)
         print('serve: pin one with --release=TAG to use it anyway.', file=sys.stderr)
     else:
-        print(f'No approved {channel} release found for TrueNAS version {version}.', file=sys.stderr)
+        print(f'No approved {channel} release found for kernel {kver} (TrueNAS {version}).', file=sys.stderr)
         print(f'Only a release approved for TrueNAS train {train} is installed: a hardware test on', file=sys.stderr)
         print('that train signed it off, or it was promoted before per-train sign-off.', file=sys.stderr)
-    # Builds this box would take once approved: its channel, its TrueNAS
-    # version (or for scripts its train), not approved. A stable box never
-    # takes a preview build, so none is promised to it.
+    # Builds this box would take once approved: its channel, its kernel and
+    # train (or for scripts its train), not approved. A stable box never takes
+    # a preview build, so none is promised to it.
     pending = sorted([r for r in data
                       if not r.get('draft')
                       and (is_preview or not preview_release(r))
                       and (built_train(r) == train if scripts_only
-                           else r.get('tag_name', '').startswith(prefix))
+                           else kernel_match(r) and same_train(r))
                       and not approved(r)], key=published, reverse=True)
-    what = f'TrueNAS train {train}' if scripts_only else f'TrueNAS {version}'
+    what = f'TrueNAS train {train}' if scripts_only else f'kernel {kver}'
     if pending:
         if is_preview:
             print(f'A build for {what} exists but is a prerelease awaiting its preview hardware', file=sys.stderr)
@@ -303,40 +339,49 @@ if not matches:
     print('ISO going live), or you can build one yourself from the repo. Available releases:', file=sys.stderr)
     for r in [x for x in data if not x.get('draft')]:
         t = r.get('tag_name', '?')
+        k = target_kernel(r) or 'no kernel recorded'
         mark = ' (prerelease)' if r.get('prerelease') else ''
-        print(f'  {t}{mark}', file=sys.stderr)
+        vt = sorted(verified_trains(r))
+        if vt:
+            mark += ' (approved for train ' + ', '.join(vt) + ')'
+        print(f'  {t} ({k}){mark}', file=sys.stderr)
     sys.exit(3)
 matches.sort(key=published, reverse=True)
 print(matches[0]['tag_name'], end='')
 # END release-selection
-" < "$4"
+" < "$5"
 }
 
 # The release to use on this box when none is pinned with --release: the
-# newest one approved for its TrueNAS train and built for its exact TrueNAS
-# version. With --scripts-only (--check, --help, uninstall, a user's own
-# image: only the release's scripts run) that release if it is approved, else
-# the newest approved one built for this train, never one built for another
-# train. Prints the tag; with nothing approved, the message names the
-# hardware tests that are waiting.
+# newest one approved for its TrueNAS train and built for its running kernel
+# (and, because of the userspace, for its train). With --scripts-only
+# (--check, --help, uninstall, a user's own image: only the release's scripts
+# run) that release if there is one, else the newest approved one built for
+# this train, never one built for another train. Prints the tag; with nothing
+# approved, the message names the hardware tests that are waiting.
 approved_release_tag() {
-    local mode=install version train pages err issues tag="" rc=0
+    local mode=install version kver train pages err issues tag="" rc=0
     [ "${1:-}" = --scripts-only ] && mode=scripts
     version=$(detect_truenas_version) || return 1
+    # The running kernel is the match key: the module binds to the exact
+    # kernel string, and many TrueNAS versions share one kernel, so the right
+    # build is the one for this kernel, whichever TrueNAS version produced it.
+    kver=$(uname -r 2>/dev/null) || kver=""
+    [ -n "$kver" ] || { echo "ERROR: could not read the running kernel (uname -r)" >&2; return 1; }
     train=$(truenas_train_key "$version") || {
         echo "ERROR: cannot derive a TrueNAS train from version '${version}'" >&2
         return 1
     }
-    echo "Detected TrueNAS version: ${version} (train ${train})" >&2
+    echo "Detected TrueNAS version: ${version} (train ${train}, kernel: ${kver})" >&2
     if [ "$mode" = scripts ]; then
-        echo "Searching for an approved release of this train, preferring this TrueNAS version..." >&2
+        echo "Searching for an approved release of this train, preferring this kernel..." >&2
     else
-        echo "Searching for an approved release matching this TrueNAS version..." >&2
+        echo "Searching for an approved release matching this kernel..." >&2
     fi
     pages=$(mktemp) || return 1
     err=$(mktemp) || { rm -f "$pages"; return 1; }
     if fetch_release_pages "$pages"; then
-        tag=$(select_approved_release "$mode" "$version" "$train" "$pages" 2>"$err") || rc=$?
+        tag=$(select_approved_release "$mode" "$version" "$kver" "$train" "$pages" 2>"$err") || rc=$?
     else
         rc=1
     fi
@@ -347,7 +392,7 @@ approved_release_tag() {
         if issues=$(mktemp); then
             curl -sS --max-time 30 "https://api.github.com/repos/${REPO}/issues?state=open&per_page=100" \
                 > "$issues" 2>/dev/null || : > "$issues"
-            select_approved_release "$mode" "$version" "$train" "$pages" "$issues" \
+            select_approved_release "$mode" "$version" "$kver" "$train" "$pages" "$issues" \
                 > /dev/null 2>"$err" || true
             rm -f "$issues"
         fi

@@ -62,8 +62,9 @@ both; a TrueNAS-only bump on one channel builds just that channel.
   highest `X.Y.Z-BETA.N` / `-RC.N`, gates on the ISO being uploaded, and bumps
   `truenas_preview.version` and `channel_url` together. The runner is pinned (`truenas_preview.runner`,
   `ubuntu-24.04`) since there is no GITMANIFEST to resolve from, and `build.yml`
-  fetches the ISO via an `iso_url` override. Preview builds publish as permanent
-  pre-releases (label `preview-hardware-test`) and are never promoted to Latest.
+  fetches the ISO via an `iso_url` override. Preview builds publish as
+  pre-releases (label `preview-hardware-test`) and become full releases for
+  their own train when their hardware test passes.
 - **MemryX half**: parses
   [Frigate's `docker/memryx/user_installation.sh`](https://github.com/blakeblackshear/frigate/blob/dev/docker/memryx/user_installation.sh)
   for the `memx-drivers=<sdk>.*` pin (currently `2.1`). Frigate explicitly
@@ -109,9 +110,11 @@ in `lint.yml`.
   [`promote.yml`](../.github/workflows/promote.yml), which appends
   `<!-- verified-train: <train> -->` to the release notes. The train comes from
   the TrueNAS version in the notes header: the major from 26 on, `major.minor`
-  before that. A stable build is promoted in the same update (prerelease flag
-  cleared, Latest when it is the newest stable version, changelog appended); a
-  preview build gets the marker only and stays a prerelease forever.
+  before that. The build, stable or preview, is promoted in the same update
+  (prerelease flag cleared, changelog appended from the previous full release
+  of the same channel), and takes Latest when it is the newest signed-off build
+  on any train by build order (the `-r<N>` run number). A stable box still never
+  installs a preview build.
 - `get.sh` and `install.sh` install a build on a train only when its notes
   carry that train's marker, or when it is a full release with no marker at
   all. Nothing else is ever installed, on stable or preview boxes. GitHub's
